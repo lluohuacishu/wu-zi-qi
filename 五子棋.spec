@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('simhei.ttf', '.')],
+    datas=[('simhei.ttf', '.'), ('chessai.dll', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

@@ -2,7 +2,7 @@
 import pygame
 import sys
 import os
-from chess_ai import ChessAI, C_NONE, C_BLACK, C_WHITE
+from chessai_bridge import ChessAI, C_NONE, C_BLACK, C_WHITE
 
 # ==================== 字体 ====================
 
@@ -18,7 +18,7 @@ def _get_font(size):
 
 # ==================== 配置 ====================
 
-AI_DEPTH = 4               # 4层 ~3s, 5层 ~15s, 6层 ~42s（有 VCF 算杀兜底）
+AI_DEPTH = 8               # C++ DLL 6层 ~0.6s
 BLOCK   = 40
 MARGIN  = 40
 LINES   = 15
