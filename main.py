@@ -2,7 +2,7 @@
 import pygame
 import sys
 import os
-from chessai_bridge import ChessAI, C_NONE, C_BLACK, C_WHITE
+from chess_ai import ChessAI, C_NONE, C_BLACK, C_WHITE
 
 # ==================== 字体 ====================
 
@@ -18,7 +18,7 @@ def _get_font(size):
 
 # ==================== 配置 ====================
 
-AI_DEPTH = 8               # C++ DLL 6层 ~0.6s
+AI_DEPTH = 4               # Python Numba 深度4 ~3s
 BLOCK   = 40
 MARGIN  = 40
 LINES   = 15
@@ -65,6 +65,12 @@ def _check_win(board, x, y, color):
             return True
     return False
 
+def _check_draw(board):
+    for row in board:
+        if C_NONE in row:
+            return False
+    return True
+
 # ==================== 主循环 ====================
 
 def main():
@@ -81,6 +87,7 @@ def main():
     ai_side = C_WHITE
     turn = C_BLACK
     over = False
+    is_draw = False
     last = None
     hist = []
 
@@ -93,8 +100,11 @@ def main():
             screen.blit(Fh.render(s, True, (0, 0, 180)), (MARGIN, 5))
 
         if over:
-            t = F.render(f'{"黑子" if turn == C_BLACK else "白子"} 胜（点任意处重置）',
-                         True, (255, 0, 0))
+            if is_draw:
+                t = F.render('平局（点任意处重置）', True, (255, 0, 0))
+            else:
+                t = F.render(f'{"黑子" if turn == C_BLACK else "白子"} 胜（点任意处重置）',
+                             True, (255, 0, 0))
             screen.blit(t, (W // 2 - t.get_width() // 2, H // 2 - 20))
 
         pygame.display.flip()
@@ -104,7 +114,7 @@ def main():
                 if e.type == pygame.QUIT: pygame.quit(); sys.exit()
                 if e.type == pygame.MOUSEBUTTONDOWN:
                     board = [[C_NONE] * LINES for _ in range(LINES)]
-                    turn = human; over = False; last = None; hist.clear()
+                    turn = human; over = False; is_draw = False; last = None; hist.clear()
             continue
 
         if turn == ai_side:
@@ -115,7 +125,10 @@ def main():
                 board[x][y] = ai_side; last = (x, y); hist.append((x, y))
                 over = _check_win(board, x, y, ai_side)
                 if not over:
-                    turn = human
+                    if _check_draw(board):
+                        over = True; is_draw = True
+                    else:
+                        turn = human
             else:
                 print(f'AI 非法落子 ({x},{y})'); turn = human
             pygame.display.set_caption('五子棋')
@@ -137,6 +150,8 @@ def main():
                         board[r][c] = human; last = (r, c); hist.append((r, c))
                         if _check_win(board, r, c, human):
                             over = True
+                        elif _check_draw(board):
+                            over = True; is_draw = True
                         else:
                             turn = ai_side
                 elif e.button == 3 and len(hist) >= 2:
