@@ -1,0 +1,13 @@
+# Python 字节码缓存
+__pycache__/
+*.pyc
+
+# PyInstaller 打包产生的临时文件和成品
+build/
+dist/
+*.spec
+
+# 编辑器/系统相关文件
+.vscode/
+.idea/
+.DS_Store
