@@ -13,5 +13,6 @@
 - **开发者控制台**：按 `C` 键可展开侧边栏，实时查看当前局面的 AI 评分与历史手顺得分。
 
 环境依赖
--pygame numpy numba
+本程序使用了以下 Python 库：
+pygame numpy numba
 当然exe已经封装了这些库，没有提前装也问题不大。
