@@ -5,7 +5,7 @@ from numba import njit
 
 # ── JIT 编译 evaluate 核心 ──
 WEIGHT = np.array([0, 1000000, -10000000, 50000, -100000, 400, -100000,
-                   400, -8000, 20, -50, 20, -50, 1, -3, 1, -3], dtype=np.int32)
+                   400, -8000, 20, -100, 50, -250, 1, -3, 1, -3], dtype=np.int32)
 
 @njit
 def _evaluate_numba(A, tt):
@@ -271,11 +271,11 @@ class ChessAI:
             return 100000
         else:
             if black==1 and white==0: return 15
-            if black==2 and white==0: return 400
+            if black==2 and white==0: return 800  # 优先防守对方活2
             if black==3 and white==0: return 1800
             if black==4 and white==0: return 100000
             if black==0 and white==1: return 35
-            if black==0 and white==2: return 800
+            if black==0 and white==2: return 400  # 降低自己建活3的优先级
             if black==0 and white==3: return 15000
             return 800000
     def _calc_one_pos_greedy(self, board, row, col, c_me):
