@@ -140,7 +140,8 @@ def main():
                 if e.type == pygame.QUIT: pygame.quit(); sys.exit()
                 if e.type == pygame.MOUSEBUTTONDOWN:
                     board = [[C_NONE]*LINES for _ in range(LINES)]
-                    turn = human; over = is_draw = False; last = None
+                    human, ai_side, turn = C_BLACK, C_WHITE, C_BLACK
+                    over = is_draw = False; last = None
                     forbidden_rule = False
                     notice = ''
                     hist.clear(); score_log.clear()
