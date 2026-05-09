@@ -14,7 +14,7 @@ def _get_font(size):
     return pygame.font.Font(None, size)
 
 # ── 全局配置 ──
-AI_DEPTH  = 2
+AI_DEPTH  = 4
 BLOCK     = 40
 MARGIN    = 40
 LINES     = 15
@@ -53,6 +53,10 @@ def _check_draw(board):
         if C_NONE in row: return False
     return True
 
+# ── 通知提示（底部临时消息） ──
+def _set_notice(msg):
+    return msg, pygame.time.get_ticks() + 1800
+
 # ── 右侧控制台面板 ──
 def _draw_console(screen, font, score_log, board, ai, rf, forbidden_rule):
     px = W
@@ -78,9 +82,6 @@ def _draw_console(screen, font, score_log, board, ai, rf, forbidden_rule):
     ry = H - len(rules) * 15 - 8
     for i, r in enumerate(rules):
         screen.blit(rf.render(r, True, (180, 180, 200)), (px + 5, ry + i * 15))
-
-def _set_notice(msg):
-    return msg, pygame.time.get_ticks() + 1800
 
 # ═══════════════ 主循环 ═══════════════
 def main():
@@ -115,7 +116,7 @@ def main():
             if not hist:
                 s = f'左键落子 | A切换先后（你{"黑先" if human == C_BLACK else "白后"}） | D禁手:{"开" if forbidden_rule else "关"}'
             else:
-                s = f'左键落子 | 右键撤回 | B AI辅助一步棋 | C控制台 | 禁手:{"开" if forbidden_rule else "关"}'
+                s = f'左键落子 | 右键撤回 | B AI辅助 | C控制台 | 禁手:{"开" if forbidden_rule else "关"}'
             screen.blit(Fh.render(s, True, (0, 0, 180)), (MARGIN, 5))
 
         if notice:
@@ -142,7 +143,6 @@ def main():
                     board = [[C_NONE]*LINES for _ in range(LINES)]
                     human, ai_side, turn = C_BLACK, C_WHITE, C_BLACK
                     over = is_draw = False; last = None
-                    forbidden_rule = False
                     notice = ''
                     hist.clear(); score_log.clear()
             continue
@@ -174,10 +174,8 @@ def main():
             if e.type == pygame.QUIT: pygame.quit(); sys.exit()
             if e.type == pygame.KEYDOWN:
                 if e.key == pygame.K_a and not hist and not over:
-                    if human == C_BLACK: 
-                        human, ai_side = C_WHITE, C_BLACK
-                    else:                
-                        human, ai_side = C_BLACK, C_WHITE
+                    if human == C_BLACK: human, ai_side = C_WHITE, C_BLACK
+                    else:                human, ai_side = C_BLACK, C_WHITE
                     turn = C_BLACK
                 if e.key == pygame.K_d and not hist and not over:
                     forbidden_rule = not forbidden_rule

@@ -27,100 +27,85 @@ def _evaluate_numba(A, tt):
         score += np.int64(stat[i]) * np.int64(WEIGHT[i])
     return (score, stat[WIN], stat[LOSE], stat[FLEX4], stat[BLOCK4], stat[FLEX3])
 
-# ── JIT 编译禁手判断核心 ──
+# ── JIT 编译禁手判断 ──
 @njit
 def _njit_line_count(board, x, y, dx, dy, color):
     cnt = 1
     nx, ny = x + dx, y + dy
     while 0 <= nx < 15 and 0 <= ny < 15 and board[nx, ny] == color:
-        cnt += 1
-        nx += dx; ny += dy
+        cnt += 1; nx += dx; ny += dy
     nx, ny = x - dx, y - dy
     while 0 <= nx < 15 and 0 <= ny < 15 and board[nx, ny] == color:
-        cnt += 1
-        nx -= dx; ny -= dy
+        cnt += 1; nx -= dx; ny -= dy
     return cnt
 
 @njit
 def _njit_has_overline(board, x, y, color):
-    dr = ((1, 0), (0, 1), (1, 1), (1, -1))
-    for i in range(4):
-        if _njit_line_count(board, x, y, dr[i][0], dr[i][1], color) > 5:
-            return True
+    for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1)):
+        if _njit_line_count(board, x, y, dx, dy, color) > 5: return True
     return False
 
 @njit
 def _njit_has_exact_five(board, x, y, color):
-    dr = ((1, 0), (0, 1), (1, 1), (1, -1))
-    for i in range(4):
-        if _njit_line_count(board, x, y, dr[i][0], dr[i][1], color) == 5:
-            return True
+    for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1)):
+        if _njit_line_count(board, x, y, dx, dy, color) == 5: return True
     return False
 
 @njit
-def _njit_count_four_lines(board, x, y, color):
-    dr = ((1, 0), (0, 1), (1, 1), (1, -1))
+def _njit_count_open_four_lines(board, x, y, color):
+    """统计落子后能造出几个活四方向"""
     ret = 0
-    for i in range(4):
-        dx, dy = dr[i]
-        has_four = False
+    for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1)):
+        has = False
         for step in range(-4, 5):
-            tx, ty = x + step * dx, y + step * dy
-            if not (0 <= tx < 15 and 0 <= ty < 15) or board[tx, ty] != 0:
-                continue
+            tx, ty = x + step*dx, y + step*dy
+            if not (0 <= tx < 15 and 0 <= ty < 15) or board[tx, ty] != 0: continue
             board[tx, ty] = color
             if _njit_line_count(board, tx, ty, dx, dy, color) == 5 and not _njit_has_overline(board, tx, ty, color):
-                has_four = True
+                has = True
             board[tx, ty] = 0
-            if has_four: break
-        if has_four: ret += 1
+            if has: break
+        if has: ret += 1
     return ret
 
 @njit
 def _njit_has_open_four_in_dir(board, x1, y1, x2, y2, dx, dy, color):
     for start in range(-5, 1):
-        anchor1 = False
-        anchor2 = False
-        match = True
+        a1 = a2 = False; ok = True
         for i in range(6):
-            cx = x2 + (start + i) * dx
-            cy = y2 + (start + i) * dy
-            if cx == x1 and cy == y1: anchor1 = True
-            if cx == x2 and cy == y2: anchor2 = True
-            val = board[cx, cy] if (0 <= cx < 15 and 0 <= cy < 15) else -1
+            cx, cy = x2 + (start+i)*dx, y2 + (start+i)*dy
+            if cx == x1 and cy == y1: a1 = True
+            if cx == x2 and cy == y2: a2 = True
+            v = board[cx, cy] if (0 <= cx < 15 and 0 <= cy < 15) else -1
             if i == 0 or i == 5:
-                if val != 0: match = False; break
+                if v != 0: ok = False; break
             else:
-                if val != color: match = False; break
-        if anchor1 and anchor2 and match:
-            return True
+                if v != color: ok = False; break
+        if a1 and a2 and ok: return True
     return False
 
 @njit
 def _njit_count_open_three_lines(board, x, y, color):
-    dr = ((1, 0), (0, 1), (1, 1), (1, -1))
+    """统计落子后能造出几个活三方向"""
     ret = 0
-    for i in range(4):
-        dx, dy = dr[i]
-        has_three = False
+    for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1)):
+        has = False
         for step in range(-4, 5):
-            tx, ty = x + step * dx, y + step * dy
-            if not (0 <= tx < 15 and 0 <= ty < 15) or board[tx, ty] != 0:
-                continue
+            tx, ty = x + step*dx, y + step*dy
+            if not (0 <= tx < 15 and 0 <= ty < 15) or board[tx, ty] != 0: continue
             board[tx, ty] = color
             if not _njit_has_overline(board, tx, ty, color) and _njit_has_open_four_in_dir(board, x, y, tx, ty, dx, dy, color):
-                has_three = True
+                has = True
             board[tx, ty] = 0
-            if has_three: break
-        if has_three: ret += 1
+            if has: break
+        if has: ret += 1
     return ret
 
 @njit
 def _njit_forbidden_reason(board, x, y, color):
-    """0:无禁手, 1:长连, 2:四四, 3:三三 (整数表示)"""
-    if _njit_has_overline(board, x, y, color): return 1
     if _njit_has_exact_five(board, x, y, color): return 0
-    if _njit_count_four_lines(board, x, y, color) >= 2: return 2
+    if _njit_has_overline(board, x, y, color): return 1
+    if _njit_count_open_four_lines(board, x, y, color) >= 2: return 2
     if _njit_count_open_three_lines(board, x, y, color) >= 2: return 3
     return 0
 
@@ -128,7 +113,6 @@ def _njit_forbidden_reason(board, x, y, color):
 C_NONE, C_BLACK, C_WHITE = 0, 1, 2
 RIGHT, UP, UPRIGHT, UPLEFT = 0, 1, 2, 3
 
-# 棋型代号
 OTHER, WIN, LOSE, FLEX4, flex4 = 0, 1, 2, 3, 4
 BLOCK4, block4, FLEX3, flex3 = 5, 6, 7, 8
 BLOCK3, block3, FLEX2, flex2 = 9, 10, 11, 12
@@ -174,34 +158,28 @@ class ChessAI:
                 elif src[i][j] == C_WHITE: dst[i][j] = C_BLACK
         return dst
 
-
     def _reverse_color(self, color):
         if color == C_BLACK: return C_WHITE
         if color == C_WHITE: return C_BLACK
         return None
 
+    # ── 胜负 & 禁手检测 ──
     def check_win(self, board, x, y, color, forbidden_rule=False):
-        """胜负判断。禁手规则开启时，黑棋必须刚好五连；白棋仍然五连及以上都算胜。"""
-        # 为了复用 JIT 函数，转化一小块区域（这里直接转整个棋盘负担不大，因为不会在深搜内大量调用这个函数）
-        # 不过深搜一般不调用 check_win，只有 main.py 每次落子调用。
-        board_np = np.array(board, dtype=np.int32)
+        b = np.array(board, dtype=np.int32)
         if forbidden_rule and color == C_BLACK:
-            return _njit_has_exact_five(board_np, x, y, color) and not _njit_has_overline(board_np, x, y, color)
+            return _njit_has_exact_five(b, x, y, color)
         for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1)):
-            if _njit_line_count(board_np, x, y, dx, dy, color) >= 5:
-                return True
+            if _njit_line_count(b, x, y, dx, dy, color) >= 5: return True
         return False
 
     def get_forbidden_reason(self, board, x, y, color=C_BLACK):
-        """返回禁手原因；不是禁手则返回 None。调用方通常只对黑棋启用。"""
-        if not self._check_bound(x, y) or board[x][y] != C_NONE:
-            return None
-        board_np = np.array(board, dtype=np.int32)
-        board_np[x, y] = color
-        res = _njit_forbidden_reason(board_np, x, y, color)
-        if res == 1: return '长连禁手'
-        if res == 2: return '四四禁手'
-        if res == 3: return '三三禁手'
+        if not self._check_bound(x, y) or board[x][y] != C_NONE: return None
+        b = np.array(board, dtype=np.int32)
+        b[x, y] = color
+        r = _njit_forbidden_reason(b, x, y, color)
+        if r == 1: return '长连禁手'
+        if r == 2: return '四四禁手'
+        if r == 3: return '三三禁手'
         return None
 
     def is_forbidden_move(self, board, x, y, color=C_BLACK):
@@ -300,7 +278,6 @@ class ChessAI:
             if black==0 and white==2: return 800
             if black==0 and white==3: return 15000
             return 800000
-
     def _calc_one_pos_greedy(self, board, row, col, c_me):
         s = 0
         for dr in range(4):
@@ -329,19 +306,15 @@ class ChessAI:
                             if 0<=j-k<15: B[i+k][j-k]=True
                         if 0<=j+k<15: B[i][j+k]=True
         worth = [[-math.inf]*15 for _ in range(15)]
-        board_np = None # 延迟初始化，如果开启禁手且是黑棋，才初始化
-        if forbidden_color is not None and c_me == forbidden_color:
-            board_np = np.array(board, dtype=np.int32)
-            
+        board_np = np.array(board, dtype=np.int32) if forbidden_color is not None and c_me == forbidden_color else None
         for i in range(15):
             for j in range(15):
                 if board[i][j]==C_NONE and B[i][j]:
                     if board_np is not None:
-                        board_np[i, j] = c_me
-                        res = _njit_forbidden_reason(board_np, i, j, c_me)
-                        board_np[i, j] = C_NONE # 恢复
-                        if res > 0: # 1:长连 2:四四 3:三三
-                            continue
+                        board_np[i,j] = c_me
+                        if _njit_forbidden_reason(board_np, i, j, c_me) > 0:
+                            board_np[i,j] = C_NONE; continue
+                        board_np[i,j] = C_NONE
                     worth[i][j] = self._calc_one_pos_greedy(board,i,j,c_me)
         best = []
         for _ in range(20):
@@ -453,39 +426,33 @@ class ChessAI:
             brd[x][y] = C_BLACK
             return self.analyse_kill(brd, depth-1, forbidden_color)
 
+    # ── 合法性兜底检查 ──
     def _action_is_legal(self, board, pos, color, forbidden_rule=False):
         if pos is None: return False
         x, y = pos
-        if not self._check_bound(x, y) or board[x][y] != C_NONE:
-            return False
+        if not self._check_bound(x, y) or board[x][y] != C_NONE: return False
         return not (forbidden_rule and color == C_BLACK and self.is_forbidden_move(board, x, y, C_BLACK))
 
     # ── 决策入口 ──
     def get_action(self, board, depth=6, ai_color=C_WHITE, forbidden_rule=False):
-        self.nodeNum = 0
-        self.decision = Decision()
+        self.nodeNum = 0; self.decision = Decision()
         b = self._reverse_board(board) if ai_color==C_BLACK else board
-        # 搜索内部固定把“自己”看成白棋；如果 AI 执黑，禁手颜色也要一起翻转。
         forbidden_color = None
         if forbidden_rule:
             forbidden_color = C_WHITE if ai_color==C_BLACK else C_BLACK
 
-        if sum(row.count(C_NONE) for row in b)==225:
-            return (7,7)
+        if sum(row.count(C_NONE) for row in b)==225: return (7,7)
         if self.analyse_kill(b, 16, forbidden_color):
             if self._action_is_legal(board, self.decision.pos, ai_color, forbidden_rule):
                 return self.decision.pos
         self.analyse(b, depth, -math.inf, math.inf, forbidden_color=forbidden_color)
         if self._action_is_legal(board, self.decision.pos, ai_color, forbidden_rule):
             return self.decision.pos
-
-        # 兜底：如果搜索首选点因为禁手等原因不可下，按候选分数找下一个合法点。
+        # 禁手导致首选不可下，逐候选找合法点
         pts = self.seek_points(b, C_WHITE, forbidden_color)
         for pos, _ in pts:
-            if self._action_is_legal(board, pos, ai_color, forbidden_rule):
-                return pos
+            if self._action_is_legal(board, pos, ai_color, forbidden_rule): return pos
         for i in range(15):
             for j in range(15):
-                if self._action_is_legal(board, (i, j), ai_color, forbidden_rule):
-                    return (i, j)
+                if self._action_is_legal(board, (i,j), ai_color, forbidden_rule): return (i,j)
         return None
