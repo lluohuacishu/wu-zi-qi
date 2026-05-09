@@ -77,6 +77,125 @@ class ChessAI:
                 elif src[i][j] == C_WHITE: dst[i][j] = C_BLACK
         return dst
 
+
+    def _reverse_color(self, color):
+        if color == C_BLACK: return C_WHITE
+        if color == C_WHITE: return C_BLACK
+        return None
+
+    # ── 禁手判断：长连、四四、三三（规则只在 main 中用于黑棋；
+    #    搜索内部有时会翻转棋盘，所以这里写成可判断任意颜色）──
+    def _line_count(self, board, x, y, dx, dy, color):
+        cnt = 1
+        nx, ny = x + dx, y + dy
+        while self._check_bound(nx, ny) and board[nx][ny] == color:
+            cnt += 1
+            nx += dx; ny += dy
+        nx, ny = x - dx, y - dy
+        while self._check_bound(nx, ny) and board[nx][ny] == color:
+            cnt += 1
+            nx -= dx; ny -= dy
+        return cnt
+
+    def _has_overline(self, board, x, y, color):
+        for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1)):
+            if self._line_count(board, x, y, dx, dy, color) > 5:
+                return True
+        return False
+
+    def _has_exact_five(self, board, x, y, color):
+        for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1)):
+            if self._line_count(board, x, y, dx, dy, color) == 5:
+                return True
+        return False
+
+    def check_win(self, board, x, y, color, forbidden_rule=False):
+        """胜负判断。禁手规则开启时，黑棋必须刚好五连；白棋仍然五连及以上都算胜。"""
+        if forbidden_rule and color == C_BLACK:
+            return self._has_exact_five(board, x, y, color) and not self._has_overline(board, x, y, color)
+        for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1)):
+            if self._line_count(board, x, y, dx, dy, color) >= 5:
+                return True
+        return False
+
+    def _count_four_lines(self, board, x, y, color):
+        """统计该点落下后形成的“四”的方向数。一个方向只计一次，避免活四两端重复计数。"""
+        ret = 0
+        for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1)):
+            has_four = False
+            for step in range(-4, 5):
+                tx, ty = x + step * dx, y + step * dy
+                if not self._check_bound(tx, ty) or board[tx][ty] != C_NONE:
+                    continue
+                board[tx][ty] = color
+                if (self._line_count(board, tx, ty, dx, dy, color) == 5 and
+                    not self._has_overline(board, tx, ty, color)):
+                    has_four = True
+                board[tx][ty] = C_NONE
+                if has_four:
+                    break
+            if has_four:
+                ret += 1
+        return ret
+
+    def _has_open_four_in_dir(self, board, x1, y1, x2, y2, dx, dy, color):
+        """第二个点落下后，是否在该方向形成 0XXXX0。"""
+        anchors = {(x1, y1), (x2, y2)}
+        for start in range(-5, 1):
+            coords = [(x2 + (start + i) * dx, y2 + (start + i) * dy) for i in range(6)]
+            if not anchors.issubset(set(coords)):
+                continue
+            vals = []
+            for tx, ty in coords:
+                vals.append(board[tx][ty] if self._check_bound(tx, ty) else -1)
+            if vals == [C_NONE, color, color, color, color, C_NONE]:
+                return True
+        return False
+
+    def _count_open_three_lines(self, board, x, y, color):
+        """统计活三方向数：再下一手能变成 0XXXX0 的三。"""
+        ret = 0
+        for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1)):
+            has_three = False
+            for step in range(-4, 5):
+                tx, ty = x + step * dx, y + step * dy
+                if not self._check_bound(tx, ty) or board[tx][ty] != C_NONE:
+                    continue
+                board[tx][ty] = color
+                if (not self._has_overline(board, tx, ty, color) and
+                    self._has_open_four_in_dir(board, x, y, tx, ty, dx, dy, color)):
+                    has_three = True
+                board[tx][ty] = C_NONE
+                if has_three:
+                    break
+            if has_three:
+                ret += 1
+        return ret
+
+    def _forbidden_reason_after(self, board, x, y, color):
+        # 长连禁手优先；刚好五连直接胜，不再判三三/四四。
+        if self._has_overline(board, x, y, color):
+            return '长连禁手'
+        if self._has_exact_five(board, x, y, color):
+            return None
+        if self._count_four_lines(board, x, y, color) >= 2:
+            return '四四禁手'
+        if self._count_open_three_lines(board, x, y, color) >= 2:
+            return '三三禁手'
+        return None
+
+    def get_forbidden_reason(self, board, x, y, color=C_BLACK):
+        """返回禁手原因；不是禁手则返回 None。调用方通常只对黑棋启用。"""
+        if not self._check_bound(x, y) or board[x][y] != C_NONE:
+            return None
+        board[x][y] = color
+        reason = self._forbidden_reason_after(board, x, y, color)
+        board[x][y] = C_NONE
+        return reason
+
+    def is_forbidden_move(self, board, x, y, color=C_BLACK):
+        return self.get_forbidden_reason(board, x, y, color) is not None
+
     # ── 棋型初始化 ──
     def _init_tuple6type(self):
         self.tuple6type[(2,2,2,2,2,2)] = WIN; self.tuple6type[(2,2,2,2,2,0)] = WIN
@@ -187,7 +306,7 @@ class ChessAI:
         return s
 
     # ── 候选点生成 ──
-    def seek_points(self, board, c_me=C_WHITE):
+    def seek_points(self, board, c_me=C_WHITE, forbidden_color=None):
         B = [[False]*15 for _ in range(15)]
         for i in range(15):
             for j in range(15):
@@ -202,6 +321,8 @@ class ChessAI:
         for i in range(15):
             for j in range(15):
                 if board[i][j]==C_NONE and B[i][j]:
+                    if forbidden_color is not None and c_me == forbidden_color and self.is_forbidden_move(board, i, j, c_me):
+                        continue
                     worth[i][j] = self._calc_one_pos_greedy(board,i,j,c_me)
         best = []
         for _ in range(20):
@@ -219,25 +340,26 @@ class ChessAI:
         return best
 
     # ── Minimax + Alpha-Beta 搜索 ──
-    def analyse(self, board, depth, alpha, beta, max_depth=None):
+    def analyse(self, board, depth, alpha, beta, max_depth=None, forbidden_color=None):
         if max_depth is None: max_depth = depth
         EVAL = self.evaluate(board)
         if depth==0 or EVAL.result!=R_DRAW:
             self.nodeNum += 1
             if depth==0:
                 is_max_leaf = max_depth%2==0
-                pts = self.seek_points(board, C_WHITE if is_max_leaf else C_BLACK)
+                pts = self.seek_points(board, C_WHITE if is_max_leaf else C_BLACK, forbidden_color)
                 return pts[0][1] if pts else EVAL.score
             return EVAL.score
         is_max = depth%2 == max_depth%2
         if is_max:
-            pts = self.seek_points(board, C_WHITE)
+            pts = self.seek_points(board, C_WHITE, forbidden_color)
+            if not pts: return EVAL.score
             if depth==max_depth and pts: self.decision.pos = pts[0][0]
             for i in range(min(10,len(pts))):
                 x, y = pts[i][0]
                 brd = self._copy_board(board)
                 brd[x][y] = C_WHITE
-                a = self.analyse(brd, depth-1, alpha, beta, max_depth)
+                a = self.analyse(brd, depth-1, alpha, beta, max_depth, forbidden_color)
                 if a>alpha:
                     alpha = a
                     if depth==max_depth:
@@ -246,21 +368,22 @@ class ChessAI:
             return alpha
         else:
             rbrd = self._reverse_board(board)
-            pts = self.seek_points(rbrd, C_WHITE)
+            pts = self.seek_points(rbrd, C_WHITE, self._reverse_color(forbidden_color))
+            if not pts: return EVAL.score
             for i in range(min(10,len(pts))):
                 x, y = pts[i][0]
                 brd = self._copy_board(board)
                 brd[x][y] = C_BLACK
-                a = self.analyse(brd, depth-1, alpha, beta, max_depth)
+                a = self.analyse(brd, depth-1, alpha, beta, max_depth, forbidden_color)
                 if a<beta: beta = a
                 if beta<=alpha: break
             return beta
 
     # ── VCF 杀棋点 ──
-    def _seek_kill_points(self, board):
+    def _seek_kill_points(self, board, forbidden_color=None):
         ret = []
         base_eval = self.evaluate(board)
-        pts = self.seek_points(board)
+        pts = self.seek_points(board, C_WHITE, forbidden_color)
         for i in range(min(20,len(pts))):
             x, y = pts[i][0]
             tmp = self._copy_board(board)
@@ -272,49 +395,78 @@ class ChessAI:
         return ret
 
     # ── VCF 算杀 ──
-    def analyse_kill(self, board, depth):
+    def analyse_kill(self, board, depth, forbidden_color=None):
         EVAL = self.evaluate(board)
         if depth==0 or EVAL.result!=R_DRAW:
             if depth==0:
-                pts = self.seek_points(board)
+                pts = self.seek_points(board, C_WHITE, forbidden_color)
+                if not pts: return False
                 tmp = self._copy_board(board)
                 tmp[pts[0][0][0]][pts[0][0][1]] = C_WHITE
                 return self.evaluate(tmp).result==R_WHITE
             return EVAL.result==R_WHITE
         if depth%2==0:
             if depth>=14:
-                pts = self.seek_points(board)
+                pts = self.seek_points(board, C_WHITE, forbidden_color)
                 for i in range(min(10,len(pts))):
                     x,y = pts[i][0]
                     brd = self._copy_board(board)
                     brd[x][y] = C_WHITE
-                    if self.analyse_kill(brd, depth-1):
+                    if self.analyse_kill(brd, depth-1, forbidden_color):
                         if depth==16:
                             self.decision.pos = (x,y); self.decision.eval_score=999999999
                         return True
                 return False
             else:
-                kpts = self._seek_kill_points(board)
+                kpts = self._seek_kill_points(board, forbidden_color)
                 if not kpts: return False
                 for x,y in kpts:
                     brd = self._copy_board(board)
                     brd[x][y] = C_WHITE
-                    if self.analyse_kill(brd, depth-1): return True
+                    if self.analyse_kill(brd, depth-1, forbidden_color): return True
                 return False
         else:
             rbrd = self._reverse_board(board)
-            pts = self.seek_points(rbrd, C_WHITE)
+            pts = self.seek_points(rbrd, C_WHITE, self._reverse_color(forbidden_color))
             if not pts: return False
             x,y = pts[0][0]
             brd = self._copy_board(board)
             brd[x][y] = C_BLACK
-            return self.analyse_kill(brd, depth-1)
+            return self.analyse_kill(brd, depth-1, forbidden_color)
+
+    def _action_is_legal(self, board, pos, color, forbidden_rule=False):
+        if pos is None: return False
+        x, y = pos
+        if not self._check_bound(x, y) or board[x][y] != C_NONE:
+            return False
+        return not (forbidden_rule and color == C_BLACK and self.is_forbidden_move(board, x, y, C_BLACK))
 
     # ── 决策入口 ──
-    def get_action(self, board, depth=6, ai_color=C_WHITE):
+    def get_action(self, board, depth=6, ai_color=C_WHITE, forbidden_rule=False):
         self.nodeNum = 0
+        self.decision = Decision()
         b = self._reverse_board(board) if ai_color==C_BLACK else board
-        if sum(row.count(C_NONE) for row in b)==225: return (7,7)
-        if self.analyse_kill(b, 16): return self.decision.pos
-        self.analyse(b, depth, -math.inf, math.inf)
-        return self.decision.pos
+        # 搜索内部固定把“自己”看成白棋；如果 AI 执黑，禁手颜色也要一起翻转。
+        forbidden_color = None
+        if forbidden_rule:
+            forbidden_color = C_WHITE if ai_color==C_BLACK else C_BLACK
+
+        if sum(row.count(C_NONE) for row in b)==225:
+            return (7,7)
+        if self.analyse_kill(b, 16, forbidden_color):
+            if self._action_is_legal(board, self.decision.pos, ai_color, forbidden_rule):
+                return self.decision.pos
+        self.analyse(b, depth, -math.inf, math.inf, forbidden_color=forbidden_color)
+        if self._action_is_legal(board, self.decision.pos, ai_color, forbidden_rule):
+            return self.decision.pos
+
+        # 兜底：如果搜索首选点因为禁手等原因不可下，按候选分数找下一个合法点。
+        pts = self.seek_points(b, C_WHITE, forbidden_color)
+        for pos, _ in pts:
+            if self._action_is_legal(board, pos, ai_color, forbidden_rule):
+                return pos
+        for i in range(15):
+            for j in range(15):
+                if self._action_is_legal(board, (i, j), ai_color, forbidden_rule):
+                    return (i, j)
+        return None

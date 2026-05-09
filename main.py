@@ -14,7 +14,7 @@ def _get_font(size):
     return pygame.font.Font(None, size)
 
 # ── 全局配置 ──
-AI_DEPTH  = 4
+AI_DEPTH  = 2
 BLOCK     = 40
 MARGIN    = 40
 LINES     = 15
@@ -48,26 +48,13 @@ def _draw_pieces(screen, board, last):
             if last == (i, j):
                 pygame.draw.circle(screen, C_RED, pos, 4)
 
-# ── 胜负判断 ──
-def _check_win(board, x, y, color):
-    for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1)):
-        cnt = 1
-        nx, ny = x + dx, y + dy
-        while 0 <= nx < LINES and 0 <= ny < LINES and board[nx][ny] == color:
-            cnt += 1; nx += dx; ny += dy
-        nx, ny = x - dx, y - dy
-        while 0 <= nx < LINES and 0 <= ny < LINES and board[nx][ny] == color:
-            cnt += 1; nx -= dx; ny -= dy
-        if cnt >= 5: return True
-    return False
-
 def _check_draw(board):
     for row in board:
         if C_NONE in row: return False
     return True
 
 # ── 右侧控制台面板 ──
-def _draw_console(screen, font, score_log, board, ai, rf):
+def _draw_console(screen, font, score_log, board, ai, rf, forbidden_rule):
     px = W
     screen.fill((30, 30, 45), (px, 0, CONSOLE_W, H))
     pygame.draw.rect(screen, (50, 50, 70), (px, 0, CONSOLE_W, 28))
@@ -76,19 +63,24 @@ def _draw_console(screen, font, score_log, board, ai, rf):
     ev = ai.evaluate(board)
     c = (0, 255, 0) if ev.score >= 0 else (255, 150, 150)
     screen.blit(font.render(f'当前: {ev.score:+d}', True, c), (px + 5, 33))
+    screen.blit(font.render(f'禁手: {"开" if forbidden_rule else "关"}', True, (230, 230, 230)), (px + 5, 51))
 
-    y = 53
-    for step, sc in score_log[-17:]:
+    y = 71
+    for step, sc in score_log[-16:]:
         c = (150, 255, 150) if sc >= 0 else (255, 150, 150)
         screen.blit(font.render(f'第{step:02d}手: {sc:+d}', True, c), (px + 5, y))
         y += 16
 
     rules = ['────── 规则 ──────', '分数 = 白方视角评估',
              '绿色 = 白方优势  红色 = 黑方优势',
-             '分数越大威胁越强', '按 C 关闭控制台']
+             '禁手开时: 黑棋禁长连/三三/四四',
+             '开局前按 D 切换禁手', '按 C 关闭控制台']
     ry = H - len(rules) * 15 - 8
     for i, r in enumerate(rules):
         screen.blit(rf.render(r, True, (180, 180, 200)), (px + 5, ry + i * 15))
+
+def _set_notice(msg):
+    return msg, pygame.time.get_ticks() + 1800
 
 # ═══════════════ 主循环 ═══════════════
 def main():
@@ -107,6 +99,8 @@ def main():
     over, is_draw, last = False, False, None
     hist, score_log = [], []
     show_console, prev_console = False, False
+    forbidden_rule = False
+    notice, notice_until = '', 0
 
     while True:
         if show_console != prev_console:
@@ -118,12 +112,20 @@ def main():
 
         # ── 提示栏 ──
         if not over:
-            s = f'左键落子 | 右键撤回 | A切换先后（你{"黑先" if human == C_BLACK else "白后"}）' \
-                if not hist else '左键落子 | 右键撤回 | B AI辅助一步棋 | C控制台'
+            if not hist:
+                s = f'左键落子 | A切换先后（你{"黑先" if human == C_BLACK else "白后"}） | D禁手:{"开" if forbidden_rule else "关"}'
+            else:
+                s = f'左键落子 | 右键撤回 | B AI辅助一步棋 | C控制台 | 禁手:{"开" if forbidden_rule else "关"}'
             screen.blit(Fh.render(s, True, (0, 0, 180)), (MARGIN, 5))
 
+        if notice:
+            if pygame.time.get_ticks() < notice_until:
+                screen.blit(Fh.render(notice, True, (180, 0, 0)), (MARGIN, H - 28))
+            else:
+                notice = ''
+
         if show_console:
-            _draw_console(screen, Fc, score_log, board, ai, Fr)
+            _draw_console(screen, Fc, score_log, board, ai, Fr, forbidden_rule)
 
         if over:
             if is_draw: t = F.render('平局（点任意处重置）', True, (255, 0, 0))
@@ -139,6 +141,8 @@ def main():
                 if e.type == pygame.MOUSEBUTTONDOWN:
                     board = [[C_NONE]*LINES for _ in range(LINES)]
                     turn = human; over = is_draw = False; last = None
+                    forbidden_rule = False
+                    notice = ''
                     hist.clear(); score_log.clear()
             continue
 
@@ -146,17 +150,21 @@ def main():
         if turn == ai_side:
             pygame.display.set_caption('五子棋（AI 思考中...）')
             pygame.event.pump()
-            x, y = ai.get_action(board, depth=AI_DEPTH, ai_color=ai_side)
+            action = ai.get_action(board, depth=AI_DEPTH, ai_color=ai_side, forbidden_rule=forbidden_rule)
             pygame.event.clear()
-            if board[x][y] == C_NONE:
-                board[x][y] = ai_side; last = (x, y); hist.append((x, y))
-                score_log.append((len(hist), ai.evaluate(board).score))
-                over = _check_win(board, x, y, ai_side)
-                if not over:
-                    if _check_draw(board): over = is_draw = True
-                    else: turn = human
+            if action is None:
+                over = is_draw = True
             else:
-                turn = human
+                x, y = action
+                if board[x][y] == C_NONE:
+                    board[x][y] = ai_side; last = (x, y); hist.append((x, y))
+                    score_log.append((len(hist), ai.evaluate(board).score))
+                    over = ai.check_win(board, x, y, ai_side, forbidden_rule)
+                    if not over:
+                        if _check_draw(board): over = is_draw = True
+                        else: turn = human
+                else:
+                    turn = human
             pygame.display.set_caption('五子棋')
 
         # ── 玩家输入事件 ──
@@ -165,8 +173,14 @@ def main():
             if e.type == pygame.QUIT: pygame.quit(); sys.exit()
             if e.type == pygame.KEYDOWN:
                 if e.key == pygame.K_a and not hist and not over:
-                    if human == C_BLACK: human, ai_side, turn = C_WHITE, C_BLACK, ai_side
-                    else:                human, ai_side, turn = C_BLACK, C_WHITE, C_BLACK
+                    if human == C_BLACK: 
+                        human, ai_side = C_WHITE, C_BLACK
+                    else:                
+                        human, ai_side = C_BLACK, C_WHITE
+                    turn = C_BLACK
+                if e.key == pygame.K_d and not hist and not over:
+                    forbidden_rule = not forbidden_rule
+                    notice, notice_until = _set_notice(f'本局禁手规则已{"开启" if forbidden_rule else "关闭"}')
                 if e.key == pygame.K_b and turn == human and not over:
                     assist = True
                 if e.key == pygame.K_c:
@@ -177,17 +191,22 @@ def main():
                     r = round((my - MARGIN) / BLOCK)
                     c = round((mx - MARGIN) / BLOCK)
                     if 0 <= r < LINES and 0 <= c < LINES and board[r][c] == C_NONE:
-                        board[r][c] = human; last = (r, c); hist.append((r, c))
-                        score_log.append((len(hist), ai.evaluate(board).score))
-                        over = _check_win(board, r, c, human)
-                        if not over:
-                            if _check_draw(board): over = is_draw = True
-                            else: turn = ai_side
+                        reason = ai.get_forbidden_reason(board, r, c, human) if forbidden_rule and human == C_BLACK else None
+                        if reason:
+                            notice, notice_until = _set_notice(f'{reason}: 黑棋不能下这里')
+                        else:
+                            board[r][c] = human; last = (r, c); hist.append((r, c))
+                            score_log.append((len(hist), ai.evaluate(board).score))
+                            over = ai.check_win(board, r, c, human, forbidden_rule)
+                            if not over:
+                                if _check_draw(board): over = is_draw = True
+                                else: turn = ai_side
                 elif e.button == 3 and len(hist) >= 2:
                     a = hist.pop(); board[a[0]][a[1]] = C_NONE
                     p = hist.pop(); board[p[0]][p[1]] = C_NONE
                     last = hist[-1] if hist else None
                     turn = human
+                    notice = ''
                     if score_log: score_log.pop()
                     if score_log: score_log.pop()
 
@@ -195,15 +214,19 @@ def main():
         if assist:
             pygame.display.set_caption('五子棋（AI 辅助思考中...）')
             pygame.event.pump()
-            x, y = ai.get_action(board, depth=AI_DEPTH, ai_color=human)
+            action = ai.get_action(board, depth=AI_DEPTH, ai_color=human, forbidden_rule=forbidden_rule)
             pygame.event.clear()
-            if board[x][y] == C_NONE:
-                board[x][y] = human; last = (x, y); hist.append((x, y))
-                score_log.append((len(hist), ai.evaluate(board).score))
-                over = _check_win(board, x, y, human)
-                if not over:
-                    if _check_draw(board): over = is_draw = True
-                    else: turn = ai_side
+            if action is None:
+                notice, notice_until = _set_notice('没有可下的合法点')
+            else:
+                x, y = action
+                if board[x][y] == C_NONE:
+                    board[x][y] = human; last = (x, y); hist.append((x, y))
+                    score_log.append((len(hist), ai.evaluate(board).score))
+                    over = ai.check_win(board, x, y, human, forbidden_rule)
+                    if not over:
+                        if _check_draw(board): over = is_draw = True
+                        else: turn = ai_side
             pygame.display.set_caption('五子棋')
 
 if __name__ == '__main__':
