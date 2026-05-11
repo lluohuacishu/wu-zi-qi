@@ -101,6 +101,7 @@ def main():
     hist, score_log = [], []
     show_console, prev_console = False, False
     forbidden_rule = False
+    pvp_mode = False
     notice, notice_until = '', 0
 
     while True:
@@ -111,13 +112,23 @@ def main():
         _draw_board(screen)
         _draw_pieces(screen, board, last)
 
-        # ── 提示栏 ──
+        # ── 提示栏 (采用双行显示以节省空间) ──
         if not over:
+            mode_str = "双人" if pvp_mode else "人机"
             if not hist:
-                s = f'左键落子 | A切换先后（你{"黑先" if human == C_BLACK else "白后"}） | D禁手:{"开" if forbidden_rule else "关"}'
+                s1 = f'左键落子 | E切换模式: {mode_str} | D禁手:{"开" if forbidden_rule else "关"}'
+                if not pvp_mode:
+                    s2 = f'A切换先后（你要{"黑先" if human == C_BLACK else "白后"}）'
+                else:
+                    s2 = '当前为双人对战，黑方先行'
             else:
-                s = f'左键落子 | 右键撤回 | B AI辅助 | C控制台 | 禁手:{"开" if forbidden_rule else "关"}'
-            screen.blit(Fh.render(s, True, (0, 0, 180)), (MARGIN, 5))
+                s1 = f'最后落子: {"黑" if turn == C_WHITE else "白"} | 右键撤回 | C控制台 | 模式: {mode_str}'
+                if pvp_mode:
+                    s2 = f'禁手:{"开" if forbidden_rule else "关"} | 当前回合: {"黑" if turn == C_BLACK else "白"}'
+                else:
+                    s2 = f'禁手:{"开" if forbidden_rule else "关"} | B AI辅助（白给建议）'
+            screen.blit(Fh.render(s1, True, (0, 0, 180)), (10, 2))
+            screen.blit(Fh.render(s2, True, (0, 0, 180)), (10, 22))
 
         if notice:
             if pygame.time.get_ticks() < notice_until:
@@ -148,7 +159,7 @@ def main():
             continue
 
         # ── AI 自动回合 ──
-        if turn == ai_side:
+        if not pvp_mode and turn == ai_side:
             pygame.display.set_caption('五子棋（AI 思考中...）')
             pygame.event.pump()
             action = ai.get_action(board, depth=AI_DEPTH, ai_color=ai_side, forbidden_rule=forbidden_rule)
@@ -173,41 +184,68 @@ def main():
         for e in pygame.event.get():
             if e.type == pygame.QUIT: pygame.quit(); sys.exit()
             if e.type == pygame.KEYDOWN:
-                if e.key == pygame.K_a and not hist and not over:
+                if e.key == pygame.K_e and not hist and not over:
+                    pvp_mode = not pvp_mode
+                    notice, notice_until = _set_notice(f'已切换为 {"双人对战" if pvp_mode else "人机对战"}')
+                if e.key == pygame.K_a and not pvp_mode and not hist and not over:
                     if human == C_BLACK: human, ai_side = C_WHITE, C_BLACK
                     else:                human, ai_side = C_BLACK, C_WHITE
                     turn = C_BLACK
                 if e.key == pygame.K_d and not hist and not over:
                     forbidden_rule = not forbidden_rule
                     notice, notice_until = _set_notice(f'本局禁手规则已{"开启" if forbidden_rule else "关闭"}')
-                if e.key == pygame.K_b and turn == human and not over:
+                if e.key == pygame.K_b and not pvp_mode and turn == human and not over:
                     assist = True
                 if e.key == pygame.K_c:
                     show_console = not show_console
-            if not assist and e.type == pygame.MOUSEBUTTONDOWN and turn == human and not over:
-                if e.button == 1:
-                    mx, my = e.pos
-                    r = round((my - MARGIN) / BLOCK)
-                    c = round((mx - MARGIN) / BLOCK)
-                    if 0 <= r < LINES and 0 <= c < LINES and board[r][c] == C_NONE:
-                        reason = ai.get_forbidden_reason(board, r, c, human) if forbidden_rule and human == C_BLACK else None
-                        if reason:
-                            notice, notice_until = _set_notice(f'{reason}: 黑棋不能下这里')
-                        else:
-                            board[r][c] = human; last = (r, c); hist.append((r, c))
-                            score_log.append((len(hist), ai.evaluate(board).score))
-                            over = ai.check_win(board, r, c, human, forbidden_rule)
-                            if not over:
-                                if _check_draw(board): over = is_draw = True
-                                else: turn = ai_side
-                elif e.button == 3 and len(hist) >= 2:
-                    a = hist.pop(); board[a[0]][a[1]] = C_NONE
-                    p = hist.pop(); board[p[0]][p[1]] = C_NONE
-                    last = hist[-1] if hist else None
-                    turn = human
-                    notice = ''
-                    if score_log: score_log.pop()
-                    if score_log: score_log.pop()
+            if e.type == pygame.MOUSEBUTTONDOWN and not over and not assist:
+                if pvp_mode:
+                    if e.button == 1:
+                        mx, my = e.pos
+                        r = round((my - MARGIN) / BLOCK)
+                        c = round((mx - MARGIN) / BLOCK)
+                        if 0 <= r < LINES and 0 <= c < LINES and board[r][c] == C_NONE:
+                            reason = ai.get_forbidden_reason(board, r, c, turn) if forbidden_rule and turn == C_BLACK else None
+                            if reason:
+                                notice, notice_until = _set_notice(f'{reason}: 黑棋不能下这里')
+                            else:
+                                board[r][c] = turn; last = (r, c); hist.append((r, c))
+                                score_log.append((len(hist), ai.evaluate(board).score))
+                                over = ai.check_win(board, r, c, turn, forbidden_rule)
+                                if not over:
+                                    if _check_draw(board): over = is_draw = True
+                                    else: turn = C_WHITE if turn == C_BLACK else C_BLACK
+                    elif e.button == 3 and len(hist) >= 1:
+                        a = hist.pop(); board[a[0]][a[1]] = C_NONE
+                        last = hist[-1] if hist else None
+                        turn = C_WHITE if turn == C_BLACK else C_BLACK
+                        notice = ''
+                        if score_log: score_log.pop()
+                else:
+                    if turn == human:
+                        if e.button == 1:
+                            mx, my = e.pos
+                            r = round((my - MARGIN) / BLOCK)
+                            c = round((mx - MARGIN) / BLOCK)
+                            if 0 <= r < LINES and 0 <= c < LINES and board[r][c] == C_NONE:
+                                reason = ai.get_forbidden_reason(board, r, c, human) if forbidden_rule and human == C_BLACK else None
+                                if reason:
+                                    notice, notice_until = _set_notice(f'{reason}: 黑棋不能下这里')
+                                else:
+                                    board[r][c] = human; last = (r, c); hist.append((r, c))
+                                    score_log.append((len(hist), ai.evaluate(board).score))
+                                    over = ai.check_win(board, r, c, human, forbidden_rule)
+                                    if not over:
+                                        if _check_draw(board): over = is_draw = True
+                                        else: turn = ai_side
+                        elif e.button == 3 and len(hist) >= 2:
+                            a = hist.pop(); board[a[0]][a[1]] = C_NONE
+                            p = hist.pop(); board[p[0]][p[1]] = C_NONE
+                            last = hist[-1] if hist else None
+                            turn = human
+                            notice = ''
+                            if score_log: score_log.pop()
+                            if score_log: score_log.pop()
 
         # ── B 键 AI 辅助 ──
         if assist:
