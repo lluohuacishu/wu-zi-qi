@@ -14,7 +14,7 @@ def _get_font(size):
     return pygame.font.Font(None, size)
 
 # ── 全局配置 ──
-AI_DEPTH  = 4
+AI_DEPTH  = 2
 BLOCK     = 40
 MARGIN    = 40
 LINES     = 15
@@ -102,7 +102,10 @@ def main():
     show_console, prev_console = False, False
     forbidden_rule = False
     pvp_mode = False
+    ai_depth = AI_DEPTH
+    show_diff_menu = False
     notice, notice_until = '', 0
+    btn_rects = []
 
     while True:
         if show_console != prev_console:
@@ -115,18 +118,19 @@ def main():
         # ── 提示栏 (采用双行显示以节省空间) ──
         if not over:
             mode_str = "双人" if pvp_mode else "人机"
+            diff_str = "新手" if ai_depth == 2 else "精通" if ai_depth == 3 else "大师" if ai_depth == 4 else str(ai_depth)
             if not hist:
-                s1 = f'左键落子 | E切换模式: {mode_str} | D禁手:{"开" if forbidden_rule else "关"}'
+                s1 = f'落子:左键 | E模式: {mode_str} | D禁手:{"开" if forbidden_rule else "关"} | F难度:{diff_str}'
                 if not pvp_mode:
                     s2 = f'A切换先后（你要{"黑先" if human == C_BLACK else "白后"}）'
                 else:
                     s2 = '当前为双人对战，黑方先行'
             else:
-                s1 = f'最后落子: {"黑" if turn == C_WHITE else "白"} | 右键撤回 | C控制台 | 模式: {mode_str}'
+                s1 = f'末子: {"黑" if turn == C_WHITE else "白"} | 右键悔棋 | C控制台 | 模式: {mode_str}'
                 if pvp_mode:
                     s2 = f'禁手:{"开" if forbidden_rule else "关"} | 当前回合: {"黑" if turn == C_BLACK else "白"}'
                 else:
-                    s2 = f'禁手:{"开" if forbidden_rule else "关"} | B AI辅助（白给建议）'
+                    s2 = f'禁手:{"开" if forbidden_rule else "关"} | B AI辅助 | F难度:{diff_str}'
             screen.blit(Fh.render(s1, True, (0, 0, 180)), (10, 2))
             screen.blit(Fh.render(s2, True, (0, 0, 180)), (10, 22))
 
@@ -143,6 +147,36 @@ def main():
             if is_draw: t = F.render('平局（点任意处重置）', True, (255, 0, 0))
             else: t = F.render(f'{"黑子"if turn==C_BLACK else"白子"} 胜（点任意处重置）', True, (255, 0, 0))
             screen.blit(t, (W // 2 - t.get_width() // 2, H // 2 - 20))
+
+        # ── 绘制难度选择弹窗 ──
+        if show_diff_menu:
+            menu_rect = pygame.Rect(W // 2 - 100, H // 2 - 120, 200, 240)
+            pygame.draw.rect(screen, (240, 240, 240), menu_rect)
+            pygame.draw.rect(screen, (0, 0, 0), menu_rect, 2)
+            
+            title_surf = Fh.render('选择 AI 难度', True, (0, 0, 0))
+            screen.blit(title_surf, (W // 2 - title_surf.get_width() // 2, H // 2 - 100))
+            
+            btn_rects = []
+            options = [("新手 (层数 2)", 2), ("精通 (层数 3)", 3), ("大师 (层数 4)", 4)]
+            mx, my = pygame.mouse.get_pos()
+            for idx, (label, val) in enumerate(options):
+                by = H // 2 - 50 + idx * 50
+                brect = pygame.Rect(W // 2 - 80, by, 160, 40)
+                btn_rects.append((brect, val))
+                
+                color = (200, 240, 200) if brect.collidepoint(mx, my) else (220, 220, 220)
+                if ai_depth == val:
+                    color = (180, 220, 180)
+                    pygame.draw.rect(screen, (0, 0, 255), brect, 2)
+                pygame.draw.rect(screen, color, brect)
+                pygame.draw.rect(screen, (0, 0, 0), brect, 1)
+                
+                if ai_depth == val:
+                    pygame.draw.rect(screen, (255, 0, 0), brect, 2)
+                
+                tsurf = Fh.render(label, True, (0, 0, 0))
+                screen.blit(tsurf, (W // 2 - tsurf.get_width() // 2, by + 10))
 
         pygame.display.flip()
 
@@ -162,7 +196,7 @@ def main():
         if not pvp_mode and turn == ai_side:
             pygame.display.set_caption('五子棋（AI 思考中...）')
             pygame.event.pump()
-            action = ai.get_action(board, depth=AI_DEPTH, ai_color=ai_side, forbidden_rule=forbidden_rule)
+            action = ai.get_action(board, depth=ai_depth, ai_color=ai_side, forbidden_rule=forbidden_rule)
             pygame.event.clear()
             if action is None:
                 over = is_draw = True
@@ -184,6 +218,8 @@ def main():
         for e in pygame.event.get():
             if e.type == pygame.QUIT: pygame.quit(); sys.exit()
             if e.type == pygame.KEYDOWN:
+                if e.key == pygame.K_f and not pvp_mode:
+                    show_diff_menu = not show_diff_menu
                 if e.key == pygame.K_e and not hist and not over:
                     pvp_mode = not pvp_mode
                     notice, notice_until = _set_notice(f'已切换为 {"双人对战" if pvp_mode else "人机对战"}')
@@ -199,6 +235,20 @@ def main():
                 if e.key == pygame.K_c:
                     show_console = not show_console
             if e.type == pygame.MOUSEBUTTONDOWN and not over and not assist:
+                if show_diff_menu:
+                    if e.button == 1:
+                        mx, my = e.pos
+                        for brect, val in btn_rects:
+                            if brect.collidepoint(mx, my):
+                                ai_depth = val
+                                notice, notice_until = _set_notice(f'AI 难度已设为 {"新手" if val==2 else "精通" if val==3 else "大师"}')
+                                show_diff_menu = False
+                                break
+                        else:
+                            if not pygame.Rect(W // 2 - 100, H // 2 - 120, 200, 240).collidepoint(mx, my):
+                                show_diff_menu = False
+                    continue
+                
                 if pvp_mode:
                     if e.button == 1:
                         mx, my = e.pos
@@ -251,7 +301,7 @@ def main():
         if assist:
             pygame.display.set_caption('五子棋（AI 辅助思考中...）')
             pygame.event.pump()
-            action = ai.get_action(board, depth=AI_DEPTH, ai_color=human, forbidden_rule=forbidden_rule)
+            action = ai.get_action(board, depth=ai_depth, ai_color=human, forbidden_rule=forbidden_rule)
             pygame.event.clear()
             if action is None:
                 notice, notice_until = _set_notice('没有可下的合法点')
