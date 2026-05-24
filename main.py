@@ -14,7 +14,7 @@ def _get_font(size):
     return pygame.font.Font(None, size)
 
 # ── 全局配置 ──
-AI_DEPTH  = 2
+AI_DEPTH  = 5
 BLOCK     = 40
 MARGIN    = 40
 LINES     = 15
@@ -52,6 +52,9 @@ def _check_draw(board):
     for row in board:
         if C_NONE in row: return False
     return True
+
+def _difficulty_name(depth):
+    return {2: "新手", 3: "精通", 4: "大师", 5: "宗师"}.get(depth, str(depth))
 
 # ── 通知提示（底部临时消息） ──
 def _set_notice(msg):
@@ -118,7 +121,7 @@ def main():
         # ── 提示栏 (采用双行显示以节省空间) ──
         if not over:
             mode_str = "双人" if pvp_mode else "人机"
-            diff_str = "新手" if ai_depth == 2 else "精通" if ai_depth == 3 else "大师" if ai_depth == 4 else str(ai_depth)
+            diff_str = _difficulty_name(ai_depth)
             if not hist:
                 s1 = f'落子:左键 | E模式: {mode_str} | D禁手:{"开" if forbidden_rule else "关"} | F难度:{diff_str}'
                 if not pvp_mode:
@@ -150,18 +153,18 @@ def main():
 
         # ── 绘制难度选择弹窗 ──
         if show_diff_menu:
-            menu_rect = pygame.Rect(W // 2 - 100, H // 2 - 120, 200, 240)
+            menu_rect = pygame.Rect(W // 2 - 100, H // 2 - 145, 200, 290)
             pygame.draw.rect(screen, (240, 240, 240), menu_rect)
             pygame.draw.rect(screen, (0, 0, 0), menu_rect, 2)
             
             title_surf = Fh.render('选择 AI 难度', True, (0, 0, 0))
-            screen.blit(title_surf, (W // 2 - title_surf.get_width() // 2, H // 2 - 100))
+            screen.blit(title_surf, (W // 2 - title_surf.get_width() // 2, H // 2 - 125))
             
             btn_rects = []
-            options = [("新手 (层数 2)", 2), ("精通 (层数 3)", 3), ("大师 (层数 4)", 4)]
+            options = [("新手 (层数 2)", 2), ("精通 (层数 3)", 3), ("大师 (层数 4)", 4), ("宗师 (层数 5)", 5)]
             mx, my = pygame.mouse.get_pos()
             for idx, (label, val) in enumerate(options):
-                by = H // 2 - 50 + idx * 50
+                by = H // 2 - 75 + idx * 50
                 brect = pygame.Rect(W // 2 - 80, by, 160, 40)
                 btn_rects.append((brect, val))
                 
@@ -241,11 +244,11 @@ def main():
                         for brect, val in btn_rects:
                             if brect.collidepoint(mx, my):
                                 ai_depth = val
-                                notice, notice_until = _set_notice(f'AI 难度已设为 {"新手" if val==2 else "精通" if val==3 else "大师"}')
+                                notice, notice_until = _set_notice(f'AI 难度已设为 {_difficulty_name(val)}')
                                 show_diff_menu = False
                                 break
                         else:
-                            if not pygame.Rect(W // 2 - 100, H // 2 - 120, 200, 240).collidepoint(mx, my):
+                            if not pygame.Rect(W // 2 - 100, H // 2 - 145, 200, 290).collidepoint(mx, my):
                                 show_diff_menu = False
                     continue
                 

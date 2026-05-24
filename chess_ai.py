@@ -122,6 +122,69 @@ BLOCK3, block3, FLEX2, flex2 = 9, 10, 11, 12
 BLOCK2, block2, FLEX1, flex1 = 13, 14, 15, 16
 R_BLACK, R_WHITE, R_DRAW = 0, 1, 2
 
+@njit
+def _tuple_score_greedy_numba(black, white, c_me):
+    if c_me==C_BLACK and black==5: return 9999999
+    if c_me==C_WHITE and white==5: return 9999999
+    if black==0 and white==0: return 7
+    if black>=1 and white>=1: return 0
+    if c_me==C_BLACK:
+        if black==1 and white==0: return 35
+        if black==2 and white==0: return 800
+        if black==3 and white==0: return 15000
+        if black==4 and white==0: return 800000
+        if black==0 and white==1: return 15
+        if black==0 and white==2: return 400
+        if black==0 and white==3: return 1800
+        return 100000
+    else:
+        if black==1 and white==0: return 15
+        if black==2 and white==0: return 800
+        if black==3 and white==0: return 1800
+        if black==4 and white==0: return 100000
+        if black==0 and white==1: return 35
+        if black==0 and white==2: return 400
+        if black==0 and white==3: return 15000
+        return 800000
+
+@njit
+def _calc_one_pos_greedy_numba(board, row, col, c_me):
+    s = 0
+    for dr in range(4):
+        for j in range(5):
+            rel = j - 4
+            if dr == RIGHT:
+                sx, sy = row, col + rel
+                ex, ey = sx, sy + 4
+            elif dr == UP:
+                sx, sy = row - rel, col
+                ex, ey = sx - 4, sy
+            elif dr == UPRIGHT:
+                sx, sy = row - rel, col + rel
+                ex, ey = sx - 4, sy + 4
+            else:
+                sx, sy = row - rel, col - rel
+                ex, ey = sx - 4, sy - 4
+            if sx < 0 or sx >= 15 or sy < 0 or sy >= 15:
+                continue
+            if ex < 0 or ex >= 15 or ey < 0 or ey >= 15:
+                continue
+
+            bc = wc = 0
+            for k in range(5):
+                if dr == RIGHT:
+                    tx, ty = sx, sy + k
+                elif dr == UP:
+                    tx, ty = sx - k, sy
+                elif dr == UPRIGHT:
+                    tx, ty = sx - k, sy + k
+                else:
+                    tx, ty = sx - k, sy - k
+                if board[tx, ty]==C_BLACK: bc += 1
+                if board[tx, ty]==C_WHITE: wc += 1
+            s += _tuple_score_greedy_numba(bc, wc, c_me)
+    return s
+
 class Evaluation:
     def __init__(self):
         self.score, self.result, self.STAT = 0, R_DRAW, [0] * 17
@@ -268,42 +331,11 @@ class ChessAI:
 
     # ── 贪心评分 ──
     def _tuple_score_greedy(self, black, white, c_me):
-        if c_me==C_BLACK and black==5: return 9999999
-        if c_me==C_WHITE and white==5: return 9999999
-        if black==0 and white==0: return 7
-        if black>=1 and white>=1: return 0
-        if c_me==C_BLACK:
-            if black==1 and white==0: return 35
-            if black==2 and white==0: return 800
-            if black==3 and white==0: return 15000
-            if black==4 and white==0: return 800000
-            if black==0 and white==1: return 15
-            if black==0 and white==2: return 400
-            if black==0 and white==3: return 1800
-            return 100000
-        else:
-            if black==1 and white==0: return 15
-            if black==2 and white==0: return 800  # 优先防守对方活2
-            if black==3 and white==0: return 1800
-            if black==4 and white==0: return 100000
-            if black==0 and white==1: return 35
-            if black==0 and white==2: return 400  # 降低自己建活3的优先级
-            if black==0 and white==3: return 15000
-            return 800000
+        return int(_tuple_score_greedy_numba(black, white, c_me))
+
     def _calc_one_pos_greedy(self, board, row, col, c_me):
-        s = 0
-        for dr in range(4):
-            for j in range(5):
-                sx, sy = self._get_xy(row, col, RIGHT+dr, j-4)
-                ex, ey = self._get_xy(sx, sy, RIGHT+dr, 4)
-                if not(self._check_bound(sx,sy) and self._check_bound(ex,ey)): continue
-                bc = wc = 0
-                for k in range(5):
-                    tx, ty = self._get_xy(sx, sy, RIGHT+dr, k)
-                    if board[tx][ty]==C_BLACK: bc+=1
-                    if board[tx][ty]==C_WHITE: wc+=1
-                s += self._tuple_score_greedy(bc, wc, c_me)
-        return s
+        board_np = np.array(board, dtype=np.int32)
+        return int(_calc_one_pos_greedy_numba(board_np, row, col, c_me))
 
     # ── 候选点生成 ──
     def seek_points(self, board, c_me=C_WHITE, forbidden_color=None):
@@ -318,16 +350,17 @@ class ChessAI:
                             if 0<=j-k<15: B[i+k][j-k]=True
                         if 0<=j+k<15: B[i][j+k]=True
         worth = [[-math.inf]*15 for _ in range(15)]
-        board_np = np.array(board, dtype=np.int32) if forbidden_color is not None and c_me == forbidden_color else None
+        board_np = np.array(board, dtype=np.int32)
+        check_forbidden = forbidden_color is not None and c_me == forbidden_color
         for i in range(15):
             for j in range(15):
                 if board[i][j]==C_NONE and B[i][j]:
-                    if board_np is not None:
+                    if check_forbidden:
                         board_np[i,j] = c_me
                         if _njit_forbidden_reason(board_np, i, j, c_me) > 0:
                             board_np[i,j] = C_NONE; continue
                         board_np[i,j] = C_NONE
-                    worth[i][j] = self._calc_one_pos_greedy(board,i,j,c_me)
+                    worth[i][j] = _calc_one_pos_greedy_numba(board_np, i, j, c_me)
         best = []
         for _ in range(20):
             w = -math.inf; bx = by = -1
@@ -335,9 +368,9 @@ class ChessAI:
                 for j in range(15):
                     if worth[i][j]>w: w=worth[i][j]; bx,by=i,j
             if bx!=-1:
-                board[bx][by]=c_me
-                sc = self.evaluate(board).score
-                board[bx][by]=C_NONE
+                board_np[bx,by]=c_me
+                sc = self.evaluate(board_np).score
+                board_np[bx,by]=C_NONE
                 best.append(((bx,by), sc))
                 worth[bx][by] = -math.inf
             else: break
