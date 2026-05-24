@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 import math
+import time
 import numpy as np
 from numba import njit
 
 # ── JIT 编译 evaluate 核心 ──
 WEIGHT = np.array([0, 1000000, -10000000, 50000, -100000, 400, -100000,
                    400, -8000, 20, -100, 50, -250, 1, -3, 1, -3], dtype=np.int32)
+THINK_TIME_LIMIT = 5.0
+KILL_DEFENSE_LIMIT = 8
 
 @njit
 def _evaluate_numba(A, tt):
@@ -125,7 +128,7 @@ class Evaluation:
 
 class Decision:
     def __init__(self):
-        self.pos, self.eval_score = (0, 0), 0
+        self.pos, self.eval_score = None, 0
 
 # ═══════════════ ChessAI 类 ═══════════════
 class ChessAI:
@@ -134,6 +137,9 @@ class ChessAI:
         self._init_tuple6type()
         self.nodeNum = 0
         self.decision = Decision()
+        self.deadline = None
+        self.timeout = False
+        self.kill_root_depth = 0
         self._tt_np = np.zeros((4, 4, 4, 4, 4, 4), dtype=np.int32)
         for k, v in self.tuple6type.items():
             self._tt_np[k[0], k[1], k[2], k[3], k[4], k[5]] = v
@@ -162,6 +168,12 @@ class ChessAI:
         if color == C_BLACK: return C_WHITE
         if color == C_WHITE: return C_BLACK
         return None
+
+    def _time_is_up(self):
+        if self.deadline is not None and time.perf_counter() >= self.deadline:
+            self.timeout = True
+            return True
+        return False
 
     # ── 胜负 & 禁手检测 ──
     def check_win(self, board, x, y, color, forbidden_rule=False):
@@ -335,6 +347,8 @@ class ChessAI:
     def analyse(self, board, depth, alpha, beta, max_depth=None, forbidden_color=None):
         if max_depth is None: max_depth = depth
         EVAL = self.evaluate(board)
+        if self._time_is_up():
+            return EVAL.score
         if depth==0 or EVAL.result!=R_DRAW:
             self.nodeNum += 1
             if depth==0:
@@ -348,6 +362,7 @@ class ChessAI:
             if not pts: return EVAL.score
             if depth==max_depth and pts: self.decision.pos = pts[0][0]
             for i in range(min(10,len(pts))):
+                if self._time_is_up(): break
                 x, y = pts[i][0]
                 brd = self._copy_board(board)
                 brd[x][y] = C_WHITE
@@ -363,6 +378,7 @@ class ChessAI:
             pts = self.seek_points(rbrd, C_WHITE, self._reverse_color(forbidden_color))
             if not pts: return EVAL.score
             for i in range(min(10,len(pts))):
+                if self._time_is_up(): break
                 x, y = pts[i][0]
                 brd = self._copy_board(board)
                 brd[x][y] = C_BLACK
@@ -388,6 +404,8 @@ class ChessAI:
 
     # ── VCF 算杀 ──
     def analyse_kill(self, board, depth, forbidden_color=None):
+        if self._time_is_up():
+            return False
         EVAL = self.evaluate(board)
         if depth==0 or EVAL.result!=R_DRAW:
             if depth==0:
@@ -401,11 +419,12 @@ class ChessAI:
             if depth>=14:
                 pts = self.seek_points(board, C_WHITE, forbidden_color)
                 for i in range(min(10,len(pts))):
+                    if self._time_is_up(): return False
                     x,y = pts[i][0]
                     brd = self._copy_board(board)
                     brd[x][y] = C_WHITE
                     if self.analyse_kill(brd, depth-1, forbidden_color):
-                        if depth==16:
+                        if depth==self.kill_root_depth:
                             self.decision.pos = (x,y); self.decision.eval_score=999999999
                         return True
                 return False
@@ -413,16 +432,21 @@ class ChessAI:
                 kpts = self._seek_kill_points(board, forbidden_color)
                 if not kpts: return False
                 for x,y in kpts:
+                    if self._time_is_up(): return False
                     brd = self._copy_board(board)
                     brd[x][y] = C_WHITE
-                    if self.analyse_kill(brd, depth-1, forbidden_color): return True
+                    if self.analyse_kill(brd, depth-1, forbidden_color):
+                        if depth==self.kill_root_depth:
+                            self.decision.pos = (x,y); self.decision.eval_score=999999999
+                        return True
                 return False
         else:
             rbrd = self._reverse_board(board)
             pts = self.seek_points(rbrd, C_WHITE, self._reverse_color(forbidden_color))
             if not pts: return False
             # 防守方只要有一种应手能解杀，就不能算作进攻方必杀。
-            for pos, _ in pts:
+            for pos, _ in pts[:KILL_DEFENSE_LIMIT]:
+                if self._time_is_up(): return False
                 x, y = pos
                 brd = self._copy_board(board)
                 brd[x][y] = C_BLACK
@@ -437,19 +461,50 @@ class ChessAI:
         if not self._check_bound(x, y) or board[x][y] != C_NONE: return False
         return not (forbidden_rule and color == C_BLACK and self.is_forbidden_move(board, x, y, C_BLACK))
 
+    def _find_immediate_win(self, board, color, forbidden_rule=False):
+        for i in range(15):
+            for j in range(15):
+                if not self._action_is_legal(board, (i, j), color, forbidden_rule):
+                    continue
+                board[i][j] = color
+                win = self.check_win(board, i, j, color, forbidden_rule)
+                board[i][j] = C_NONE
+                if win:
+                    return (i, j)
+        return None
+
+    def _kill_depth_for_search(self, depth):
+        if depth <= 2:
+            return 0
+        if depth == 3:
+            return 10
+        return 16
+
     # ── 决策入口 ──
-    def get_action(self, board, depth=6, ai_color=C_WHITE, forbidden_rule=False):
+    def get_action(self, board, depth=6, ai_color=C_WHITE, forbidden_rule=False, time_limit=THINK_TIME_LIMIT):
         self.nodeNum = 0; self.decision = Decision()
+        self.deadline = time.perf_counter() + time_limit if time_limit is not None else None
+        self.timeout = False
         b = self._reverse_board(board) if ai_color==C_BLACK else board
         forbidden_color = None
         if forbidden_rule:
             forbidden_color = C_WHITE if ai_color==C_BLACK else C_BLACK
 
         if sum(row.count(C_NONE) for row in b)==225: return (7,7)
-        if self.analyse_kill(b, 16, forbidden_color):
+        win_pos = self._find_immediate_win(board, ai_color, forbidden_rule)
+        if win_pos is not None:
+            return win_pos
+        block_pos = self._find_immediate_win(board, self._reverse_color(ai_color), forbidden_rule)
+        if self._action_is_legal(board, block_pos, ai_color, forbidden_rule):
+            return block_pos
+
+        kill_depth = self._kill_depth_for_search(depth)
+        self.kill_root_depth = kill_depth
+        if kill_depth and self.analyse_kill(b, kill_depth, forbidden_color):
             if self._action_is_legal(board, self.decision.pos, ai_color, forbidden_rule):
                 return self.decision.pos
-        self.analyse(b, depth, -math.inf, math.inf, forbidden_color=forbidden_color)
+        if not self.timeout:
+            self.analyse(b, depth, -math.inf, math.inf, forbidden_color=forbidden_color)
         if self._action_is_legal(board, self.decision.pos, ai_color, forbidden_rule):
             return self.decision.pos
         # 禁手导致首选不可下，逐候选找合法点
