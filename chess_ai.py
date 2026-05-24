@@ -5,10 +5,14 @@ import numpy as np
 from numba import njit
 
 # ── JIT 编译 evaluate 核心 ──
-WEIGHT = np.array([0, 1000000, -10000000, 50000, -100000, 400, -100000,
-                   400, -8000, 20, -100, 50, -250, 1, -3, 1, -3], dtype=np.int32)
+WEIGHT = np.array([0, 1000000, -10000000, 50000, -100000, 3000, -100000,
+                   1200, -8000, 100, -100, 60, -250, 1, -3, 1, -3], dtype=np.int32)
 THINK_TIME_LIMIT = 5.0
 KILL_DEFENSE_LIMIT = 8
+DOUBLE_FLEX3_BONUS = 40000
+DOUBLE_FLEX3_PENALTY = 60000
+EXTRA_FLEX3_BONUS = 12000
+EXTRA_FLEX3_PENALTY = 18000
 
 @njit
 def _evaluate_numba(A, tt):
@@ -28,6 +32,15 @@ def _evaluate_numba(A, tt):
     score = np.int64(0)
     for i in range(1, 17):
         score += np.int64(stat[i]) * np.int64(WEIGHT[i])
+    # 一个连续活三会被 6 元组窗口扫到两次，先折算成更接近“活三组数”的单位。
+    white_flex3_units = (stat[FLEX3] + 1) // 2
+    black_flex3_units = (stat[flex3] + 1) // 2
+    if white_flex3_units >= 2:
+        score += np.int64(DOUBLE_FLEX3_BONUS)
+        score += np.int64(white_flex3_units - 2) * np.int64(EXTRA_FLEX3_BONUS)
+    if black_flex3_units >= 2:
+        score -= np.int64(DOUBLE_FLEX3_PENALTY)
+        score -= np.int64(black_flex3_units - 2) * np.int64(EXTRA_FLEX3_PENALTY)
     return (score, stat[WIN], stat[LOSE], stat[FLEX4], stat[BLOCK4], stat[FLEX3])
 
 # ── JIT 编译禁手判断 ──
