@@ -421,10 +421,14 @@ class ChessAI:
             rbrd = self._reverse_board(board)
             pts = self.seek_points(rbrd, C_WHITE, self._reverse_color(forbidden_color))
             if not pts: return False
-            x,y = pts[0][0]
-            brd = self._copy_board(board)
-            brd[x][y] = C_BLACK
-            return self.analyse_kill(brd, depth-1, forbidden_color)
+            # 防守方只要有一种应手能解杀，就不能算作进攻方必杀。
+            for pos, _ in pts:
+                x, y = pos
+                brd = self._copy_board(board)
+                brd[x][y] = C_BLACK
+                if not self.analyse_kill(brd, depth-1, forbidden_color):
+                    return False
+            return True
 
     # ── 合法性兜底检查 ──
     def _action_is_legal(self, board, pos, color, forbidden_rule=False):
