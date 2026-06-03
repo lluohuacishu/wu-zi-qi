@@ -1,24 +1,31 @@
 # -*- coding: utf-8 -*-
-import pygame, sys, os
+import pygame, sys
 from chess_ai import ChessAI, C_NONE, C_BLACK, C_WHITE
 
-# ── 跨平台字体加载 ──
+# ── 系统字体加载 ──
 def _get_font(size):
-    base = getattr(sys, '_MEIPASS', os.path.dirname(__file__))
-    bundled = os.path.join(base, 'simhei.ttf')
-    if os.path.exists(bundled):
-        return pygame.font.Font(bundled, size)
-    for name in ('simhei', 'microsoft yahei', 'simsun', 'kaiti', 'fangsong'):
+    font_names = (
+        'simhei', 'microsoft yahei', 'microsoft yahei ui', 'simsun',
+        'nsimsun', 'kaiti', 'fangsong', 'pingfang sc',
+        'hiragino sans gb', 'noto sans cjk sc', 'source han sans sc',
+        'wenquanyi micro hei', 'arial unicode ms',
+    )
+    for name in font_names:
         if pygame.font.match_font(name):
-            return pygame.font.SysFont(name, size)
+            try:
+                return pygame.font.SysFont(name, size)
+            except pygame.error:
+                continue
     return pygame.font.Font(None, size)
 
 # ── 全局配置 ──
 AI_DEPTH  = 5
 BLOCK     = 40
 MARGIN    = 40
+TOP_MARGIN = 72
 LINES     = 15
-W, H      = BLOCK * (LINES - 1) + MARGIN * 2, BLOCK * (LINES - 1) + MARGIN * 2
+BOARD_SIZE = BLOCK * (LINES - 1)
+W, H      = BOARD_SIZE + MARGIN * 2, BOARD_SIZE + TOP_MARGIN + MARGIN
 CONSOLE_W = 280
 
 C_BG   = (220, 180, 100)
@@ -29,20 +36,20 @@ C_RED  = (255, 0, 0)
 def _draw_board(screen):
     screen.fill(C_BG)
     for i in range(LINES):
-        y = MARGIN + i * BLOCK
+        y = TOP_MARGIN + i * BLOCK
         pygame.draw.line(screen, C_LINE, (MARGIN, y), (W - MARGIN, y), 2)
         x = MARGIN + i * BLOCK
-        pygame.draw.line(screen, C_LINE, (x, MARGIN), (x, H - MARGIN), 2)
+        pygame.draw.line(screen, C_LINE, (x, TOP_MARGIN), (x, H - MARGIN), 2)
     for px, py in ((3, 3), (11, 3), (3, 11), (11, 11), (7, 7)):
         pygame.draw.circle(screen, C_LINE,
-                           (MARGIN + px * BLOCK, MARGIN + py * BLOCK), 5)
+                           (MARGIN + px * BLOCK, TOP_MARGIN + py * BLOCK), 5)
 
 # ── 棋子绘制 ──
 def _draw_pieces(screen, board, last):
     for i in range(LINES):
         for j in range(LINES):
             if board[i][j] == C_NONE: continue
-            pos = (MARGIN + j * BLOCK, MARGIN + i * BLOCK)
+            pos = (MARGIN + j * BLOCK, TOP_MARGIN + i * BLOCK)
             c = (0, 0, 0) if board[i][j] == C_BLACK else (255, 255, 255)
             pygame.draw.circle(screen, c, pos, BLOCK // 2 - 4)
             if last == (i, j):
@@ -255,7 +262,7 @@ def main():
                 if pvp_mode:
                     if e.button == 1:
                         mx, my = e.pos
-                        r = round((my - MARGIN) / BLOCK)
+                        r = round((my - TOP_MARGIN) / BLOCK)
                         c = round((mx - MARGIN) / BLOCK)
                         if 0 <= r < LINES and 0 <= c < LINES and board[r][c] == C_NONE:
                             reason = ai.get_forbidden_reason(board, r, c, turn) if forbidden_rule and turn == C_BLACK else None
@@ -278,7 +285,7 @@ def main():
                     if turn == human:
                         if e.button == 1:
                             mx, my = e.pos
-                            r = round((my - MARGIN) / BLOCK)
+                            r = round((my - TOP_MARGIN) / BLOCK)
                             c = round((mx - MARGIN) / BLOCK)
                             if 0 <= r < LINES and 0 <= c < LINES and board[r][c] == C_NONE:
                                 reason = ai.get_forbidden_reason(board, r, c, human) if forbidden_rule and human == C_BLACK else None

@@ -1,0 +1,4 @@
+pygame==2.6.1
+numpy==2.3.5
+numba==0.63.1
+pyinstaller==6.20.0

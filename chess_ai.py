@@ -221,7 +221,27 @@ class ChessAI:
             self._tt_np[k[0], k[1], k[2], k[3], k[4], k[5]] = v
 
     # ── 基础工具 ──
-    def _check_bound(self, x, y): return 0 <= x < 15 and 0 <= y < 15
+    def _check_bound(self, x, y):
+        if not isinstance(x, (int, np.integer)) or not isinstance(y, (int, np.integer)):
+            return False
+        return 0 <= int(x) < 15 and 0 <= int(y) < 15
+
+    def _validate_color(self, color):
+        if color not in (C_BLACK, C_WHITE):
+            raise ValueError('color must be C_BLACK or C_WHITE')
+
+    def _board_array(self, board, copy=False):
+        try:
+            raw = np.asarray(board)
+        except (TypeError, ValueError) as exc:
+            raise ValueError('board must be a 15x15 grid containing only 0, 1, and 2') from exc
+        if raw.shape != (15, 15):
+            raise ValueError(f'board must be 15x15, got {raw.shape}')
+        if not np.issubdtype(raw.dtype, np.integer):
+            raise ValueError('board values must be integers: C_NONE, C_BLACK, or C_WHITE')
+        if np.any((raw < C_NONE) | (raw > C_WHITE)):
+            raise ValueError('board values must be C_NONE, C_BLACK, or C_WHITE')
+        return raw.astype(np.int32, copy=copy)
 
     def _get_xy(self, row, col, dr, rel):
         if dr == RIGHT:   return (row, col + rel)
@@ -230,7 +250,7 @@ class ChessAI:
         if dr == UPLEFT:  return (row - rel, col - rel)
         return (row, col)
 
-    def _copy_board(self, src): return [row[:] for row in src]
+    def _copy_board(self, src): return [list(row) for row in src]
 
     def _reverse_board(self, src):
         dst = [[C_NONE] * 15 for _ in range(15)]
@@ -253,7 +273,9 @@ class ChessAI:
 
     # ── 胜负 & 禁手检测 ──
     def check_win(self, board, x, y, color, forbidden_rule=False):
-        b = np.array(board, dtype=np.int32)
+        b = self._board_array(board)
+        if not self._check_bound(x, y): return False
+        self._validate_color(color)
         if forbidden_rule and color == C_BLACK:
             return _njit_has_exact_five(b, x, y, color)
         for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1)):
@@ -261,8 +283,9 @@ class ChessAI:
         return False
 
     def get_forbidden_reason(self, board, x, y, color=C_BLACK):
-        if not self._check_bound(x, y) or board[x][y] != C_NONE: return None
-        b = np.array(board, dtype=np.int32)
+        b = self._board_array(board, copy=True)
+        if not self._check_bound(x, y) or b[x, y] != C_NONE: return None
+        self._validate_color(color)
         b[x, y] = color
         r = _njit_forbidden_reason(b, x, y, color)
         if r == 1: return '长连禁手'
@@ -332,7 +355,7 @@ class ChessAI:
     # ── 局面评估 ──
     def evaluate(self, board):
         A = np.full((17, 17), 3, dtype=np.int32)
-        A[1:16, 1:16] = np.array(board, dtype=np.int32)
+        A[1:16, 1:16] = self._board_array(board)
         score, w, l, f4, b4, f3 = _evaluate_numba(A, self._tt_np)
         ev = Evaluation()
         ev.score = int(score)
@@ -347,15 +370,22 @@ class ChessAI:
         return int(_tuple_score_greedy_numba(black, white, c_me))
 
     def _calc_one_pos_greedy(self, board, row, col, c_me):
-        board_np = np.array(board, dtype=np.int32)
+        self._validate_color(c_me)
+        if not self._check_bound(row, col):
+            raise ValueError('row and col must be within the 15x15 board')
+        board_np = self._board_array(board)
         return int(_calc_one_pos_greedy_numba(board_np, row, col, c_me))
 
     # ── 候选点生成 ──
     def seek_points(self, board, c_me=C_WHITE, forbidden_color=None):
+        self._validate_color(c_me)
+        if forbidden_color is not None:
+            self._validate_color(forbidden_color)
+        board_np = self._board_array(board, copy=True)
         B = [[False]*15 for _ in range(15)]
         for i in range(15):
             for j in range(15):
-                if board[i][j]!=C_NONE:
+                if board_np[i, j]!=C_NONE:
                     for k in range(-3,4):
                         if 0<=i+k<15:
                             B[i+k][j]=True
@@ -363,11 +393,10 @@ class ChessAI:
                             if 0<=j-k<15: B[i+k][j-k]=True
                         if 0<=j+k<15: B[i][j+k]=True
         worth = [[-math.inf]*15 for _ in range(15)]
-        board_np = np.array(board, dtype=np.int32)
         check_forbidden = forbidden_color is not None and c_me == forbidden_color
         for i in range(15):
             for j in range(15):
-                if board[i][j]==C_NONE and B[i][j]:
+                if board_np[i, j]==C_NONE and B[i][j]:
                     if check_forbidden:
                         board_np[i,j] = c_me
                         if _njit_forbidden_reason(board_np, i, j, c_me) > 0:
@@ -503,7 +532,10 @@ class ChessAI:
     # ── 合法性兜底检查 ──
     def _action_is_legal(self, board, pos, color, forbidden_rule=False):
         if pos is None: return False
-        x, y = pos
+        try:
+            x, y = pos
+        except (TypeError, ValueError):
+            return False
         if not self._check_bound(x, y) or board[x][y] != C_NONE: return False
         return not (forbidden_rule and color == C_BLACK and self.is_forbidden_move(board, x, y, C_BLACK))
 
@@ -528,6 +560,8 @@ class ChessAI:
 
     # ── 决策入口 ──
     def get_action(self, board, depth=6, ai_color=C_WHITE, forbidden_rule=False, time_limit=THINK_TIME_LIMIT):
+        self._validate_color(ai_color)
+        board = self._board_array(board).tolist()
         self.nodeNum = 0; self.decision = Decision()
         self.deadline = time.perf_counter() + time_limit if time_limit is not None else None
         self.timeout = False
