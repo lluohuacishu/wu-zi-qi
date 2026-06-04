@@ -25,7 +25,7 @@ AI_DEPTH  = 5
 LAN_PORT  = 50007
 LAN_PROTOCOL_VERSION = 1
 LAN_MAX_MESSAGE_BYTES = 4096
-LAN_ROOM_CODE_DIGITS = 4
+LAN_ROOM_CODE_DIGITS = 6
 LAN_FRAME_RATE = 60
 BLOCK     = 40
 MARGIN    = 40
@@ -185,6 +185,19 @@ def _get_forbidden_reason_fast(board, r, c, color):
         return None
     finally:
         board[r][c] = C_NONE
+
+def _is_protocol_supported(msg):
+    return type(msg.get('protocol')) is int and msg.get('protocol') == LAN_PROTOCOL_VERSION
+
+def _require_json_int(value):
+    if type(value) is not int:
+        raise ValueError('expected json integer')
+    return value
+
+def _require_json_bool(value):
+    if type(value) is not bool:
+        raise ValueError('expected json boolean')
+    return value
 
 # ── 通知提示（底部临时消息） ──
 def _set_notice(msg):
@@ -552,7 +565,10 @@ def main():
         hist.append((r, c))
         if record_score:
             score_log.append((len(hist), ai.evaluate(board).score))
-        over = _check_win_fast(board, r, c, color, forbidden_rule)
+        if lan_rules_only:
+            over = _check_win_fast(board, r, c, color, forbidden_rule)
+        else:
+            over = ai.check_win(board, r, c, color, forbidden_rule)
         if over:
             turn = color
             return True, ''
@@ -594,7 +610,7 @@ def main():
             notice, notice_until = _set_notice('请输入有效的主机 IP')
             return False
         if len(room_code) != LAN_ROOM_CODE_DIGITS or not room_code.isdigit():
-            notice, notice_until = _set_notice('请输入主机 IP#4位房间码')
+            notice, notice_until = _set_notice(f'请输入主机 IP#{LAN_ROOM_CODE_DIGITS}位房间码')
             return False
         if hist:
             notice, notice_until = _set_notice('开局后不能加入联机房间')
@@ -770,7 +786,7 @@ def main():
             if not isinstance(msg, dict):
                 leave_lan_to_local('收到异常联机消息')
                 continue
-            if msg.get('protocol') != LAN_PROTOCOL_VERSION:
+            if not _is_protocol_supported(msg):
                 if should_reopen_waiting_host():
                     lan.send({'type': 'reject', 'reason': '版本不一致，请使用新版程序'})
                     reopen_lan_host('对方版本不一致，继续等待加入')
@@ -792,12 +808,15 @@ def main():
                         set_lan_sides(lan_host_side, is_host=True)
                         turn = C_BLACK
                         lan_mode, pvp_mode = True, False
-                        lan.send({
+                        ok = lan.send({
                             'type': 'start',
                             'forbidden_rule': forbidden_rule,
                             'host_side': lan_host_side,
                         })
-                        notice, notice_until = _set_notice(f'验证通过，你执{side_name(local_side)}')
+                        if ok:
+                            notice, notice_until = _set_notice(f'验证通过，你执{side_name(local_side)}')
+                        else:
+                            leave_lan_to_local('开局同步发送失败，已切换为本地双人')
                 continue
             if kind == 'reject':
                 reason = str(msg.get('reason', '加入被拒绝'))[:40]
@@ -807,14 +826,15 @@ def main():
                 if lan.is_host or lan_authenticated:
                     continue
                 try:
-                    host_side = int(msg.get('host_side', C_BLACK))
+                    host_side = _require_json_int(msg.get('host_side'))
+                    remote_forbidden_rule = _require_json_bool(msg.get('forbidden_rule'))
                 except (TypeError, ValueError):
                     leave_lan_to_local('收到异常开局数据')
                     continue
                 if host_side not in (C_BLACK, C_WHITE):
                     leave_lan_to_local('收到异常开局数据')
                     continue
-                forbidden_rule = bool(msg.get('forbidden_rule', False))
+                forbidden_rule = remote_forbidden_rule
                 reset_board()
                 lan_authenticated = True
                 lan_host_side = host_side
@@ -827,7 +847,7 @@ def main():
                 continue
             if kind == 'restart_request':
                 try:
-                    game_id = int(msg.get('game_id', -1))
+                    game_id = _require_json_int(msg.get('game_id'))
                 except (TypeError, ValueError):
                     notice, notice_until = _set_notice('收到异常重开请求')
                     continue
@@ -841,8 +861,8 @@ def main():
                 continue
             if kind == 'restart_commit':
                 try:
-                    game_id = int(msg.get('game_id', -1))
-                    host_side = int(msg.get('host_side', C_BLACK))
+                    game_id = _require_json_int(msg.get('game_id'))
+                    host_side = _require_json_int(msg.get('host_side'))
                 except (TypeError, ValueError):
                     notice, notice_until = _set_notice('收到异常重开确认')
                     continue
@@ -868,10 +888,11 @@ def main():
                 if over:
                     continue
                 try:
-                    r, c = int(msg['row']), int(msg['col'])
-                    color = int(msg['color'])
-                    game_id = int(msg['game_id'])
-                    move_no = int(msg.get('move_no', len(hist) + 1))
+                    r = _require_json_int(msg.get('row'))
+                    c = _require_json_int(msg.get('col'))
+                    color = _require_json_int(msg.get('color'))
+                    game_id = _require_json_int(msg.get('game_id'))
+                    move_no = _require_json_int(msg.get('move_no'))
                 except (KeyError, TypeError, ValueError):
                     notice, notice_until = _set_notice('收到异常落子数据')
                     continue
@@ -1106,7 +1127,7 @@ def main():
                             if 0 <= r < LINES and 0 <= c < LINES:
                                 ok, reason = place_piece(r, c, local_side, record_score=False, lan_rules_only=True)
                                 if ok:
-                                    lan.send({
+                                    sent = lan.send({
                                         'type': 'move',
                                         'game_id': lan_game_id,
                                         'row': r,
@@ -1114,6 +1135,8 @@ def main():
                                         'color': local_side,
                                         'move_no': len(hist),
                                     })
+                                    if not sent:
+                                        leave_lan_to_local('落子发送失败，已切换为本地双人')
                                 else:
                                     notice, notice_until = _set_notice(reason)
                     continue
