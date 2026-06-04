@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import json, queue, secrets, socket, sys, threading
+import json, queue, secrets, socket, sys, threading, time
 
 import pygame
 from chess_ai import ChessAI, C_NONE, C_BLACK, C_WHITE
@@ -23,9 +23,11 @@ def _get_font(size):
 # ── 全局配置 ──
 AI_DEPTH  = 5
 LAN_PORT  = 50007
+LAN_DISCOVERY_PORT = LAN_PORT + 1
 LAN_PROTOCOL_VERSION = 1
 LAN_MAX_MESSAGE_BYTES = 4096
 LAN_ROOM_CODE_DIGITS = 6
+LAN_DISCOVERY_TIMEOUT = 1.2
 LAN_FRAME_RATE = 60
 BLOCK     = 40
 MARGIN    = 40
@@ -227,6 +229,8 @@ def _parse_join_target(text):
         target, room_code = target.rsplit('#', 1)
         target = target.strip()
         room_code = room_code.strip()
+    elif target.isdigit():
+        return '', LAN_PORT, target
     if ':' not in target:
         return target, LAN_PORT, room_code
 
@@ -411,21 +415,140 @@ class LanConnection:
         self.sock = None
         self.server = None
 
+class LanDiscoveryResponder:
+    def __init__(self, room_code, tcp_port=LAN_PORT):
+        self.room_code = room_code
+        self.tcp_port = tcp_port
+        self.closed = False
+        self.sock = None
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(('', LAN_DISCOVERY_PORT))
+            sock.settimeout(0.25)
+            self.sock = sock
+            while not self.closed:
+                try:
+                    data, addr = sock.recvfrom(LAN_MAX_MESSAGE_BYTES)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if len(data) > LAN_MAX_MESSAGE_BYTES:
+                    continue
+                try:
+                    msg = json.loads(data.decode('utf-8'))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get('type') != 'discover' or not _is_protocol_supported(msg):
+                    continue
+                if str(msg.get('code', '')) != self.room_code:
+                    continue
+                reply = {
+                    'type': 'discover_reply',
+                    'protocol': LAN_PROTOCOL_VERSION,
+                    'code': self.room_code,
+                    'port': self.tcp_port,
+                }
+                raw = json.dumps(reply, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+                try:
+                    sock.sendto(raw, addr)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            self.sock = None
+
+    def close(self):
+        self.closed = True
+        if self.sock:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+
+def _discover_lan_host(room_code, timeout=LAN_DISCOVERY_TIMEOUT):
+    payload = {
+        'type': 'discover',
+        'protocol': LAN_PROTOCOL_VERSION,
+        'code': room_code,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    targets = (
+        ('255.255.255.255', LAN_DISCOVERY_PORT),
+        ('<broadcast>', LAN_DISCOVERY_PORT),
+        ('127.0.0.1', LAN_DISCOVERY_PORT),
+    )
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.settimeout(0.12)
+        deadline = time.monotonic() + timeout
+        next_send = 0.0
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            if now >= next_send:
+                for target in targets:
+                    try:
+                        sock.sendto(raw, target)
+                    except OSError:
+                        pass
+                next_send = now + 0.25
+            try:
+                data, addr = sock.recvfrom(LAN_MAX_MESSAGE_BYTES)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                msg = json.loads(data.decode('utf-8'))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(msg, dict):
+                continue
+            if msg.get('type') != 'discover_reply' or not _is_protocol_supported(msg):
+                continue
+            if str(msg.get('code', '')) != room_code:
+                continue
+            try:
+                port = _require_json_int(msg.get('port'))
+            except ValueError:
+                continue
+            if 1 <= port <= 65535:
+                return addr[0], port
+    finally:
+        if sock:
+            sock.close()
+    return None
+
 def _draw_join_dialog(screen, font, text):
     rect = pygame.Rect(W // 2 - 180, H // 2 - 70, 360, 140)
     pygame.draw.rect(screen, (245, 245, 245), rect)
     pygame.draw.rect(screen, (0, 0, 0), rect, 2)
-    title = font.render('输入主机 IP#房间码 后按 Enter', True, (0, 0, 0))
+    title = font.render('输入房间号 后按 Enter', True, (0, 0, 0))
     screen.blit(title, (rect.centerx - title.get_width() // 2, rect.y + 18))
 
     input_rect = pygame.Rect(rect.x + 32, rect.y + 58, rect.w - 64, 34)
     pygame.draw.rect(screen, (255, 255, 255), input_rect)
     pygame.draw.rect(screen, (60, 60, 60), input_rect, 1)
-    shown = text if text else '例如 192.168.1.8#1234'
+    shown = text if text else '例如 123456'
     color = (0, 0, 0) if text else (130, 130, 130)
     screen.blit(font.render(shown, True, color), (input_rect.x + 8, input_rect.y + 6))
 
-    tip = font.render('Esc 取消，可写成 IP:端口#房间码', True, (80, 80, 80))
+    tip = font.render('自动搜索主机，也可写成 IP#房间号', True, (80, 80, 80))
     screen.blit(tip, (rect.centerx - tip.get_width() // 2, rect.y + 104))
 
 # ── 右侧控制台面板 ──
@@ -486,12 +609,18 @@ def main():
     lan_game_id = 0
     lan_restart_local = False
     lan_restart_remote = False
+    lan_undo_local = False
+    lan_undo_remote = False
+    lan_undo_move_no = None
     local_side, remote_side = None, None
     join_input, join_ip = False, ''
     lan_ip = _get_lan_ip()
+    lan_discovery = None
     forbidden_warm_started = False
 
     def quit_game():
+        if lan_discovery:
+            lan_discovery.close()
         if lan:
             if lan.connected:
                 lan.send({'type': 'bye'})
@@ -501,7 +630,7 @@ def main():
 
     def reset_board(reset_sides=False):
         nonlocal board, human, ai_side, turn, over, is_draw, last, notice, show_diff_menu
-        nonlocal lan_restart_local, lan_restart_remote
+        nonlocal lan_restart_local, lan_restart_remote, lan_undo_local, lan_undo_remote, lan_undo_move_no
         board = [[C_NONE] * LINES for _ in range(LINES)]
         if reset_sides:
             human, ai_side = C_BLACK, C_WHITE
@@ -511,6 +640,9 @@ def main():
         show_diff_menu = False
         lan_restart_local = False
         lan_restart_remote = False
+        lan_undo_local = False
+        lan_undo_remote = False
+        lan_undo_move_no = None
         hist.clear()
         score_log.clear()
 
@@ -542,6 +674,12 @@ def main():
         except Exception:
             pass
 
+    def clear_lan_undo():
+        nonlocal lan_undo_local, lan_undo_remote, lan_undo_move_no
+        lan_undo_local = False
+        lan_undo_remote = False
+        lan_undo_move_no = None
+
     def place_piece(r, c, color, record_score=True, lan_rules_only=False):
         nonlocal over, is_draw, last, turn
         if not (0 <= r < LINES and 0 <= c < LINES):
@@ -563,6 +701,8 @@ def main():
         board[r][c] = color
         last = (r, c)
         hist.append((r, c))
+        if lan_rules_only:
+            clear_lan_undo()
         if record_score:
             score_log.append((len(hist), ai.evaluate(board).score))
         if lan_rules_only:
@@ -582,35 +722,46 @@ def main():
 
     def start_lan_host():
         nonlocal lan, lan_mode, lan_authenticated, lan_room_code, pvp_mode
-        nonlocal human, ai_side, turn, show_console, lan_game_id, notice, notice_until
+        nonlocal human, ai_side, turn, show_console, lan_game_id, notice, notice_until, lan_discovery
         if hist:
             notice, notice_until = _set_notice('开局后不能创建联机房间')
             return
         if lan:
             lan.close()
+        if lan_discovery:
+            lan_discovery.close()
         reset_board()
         lan_game_id = 0
         show_console = False
         lan_room_code = f'{secrets.randbelow(10 ** LAN_ROOM_CODE_DIGITS):0{LAN_ROOM_CODE_DIGITS}d}'
         lan_authenticated = False
         lan = LanConnection(True, port=LAN_PORT)
+        lan_discovery = LanDiscoveryResponder(lan_room_code, LAN_PORT)
         lan_mode = True
         pvp_mode = False
         set_lan_sides(lan_host_side, is_host=True)
         turn = C_BLACK
         notice, notice_until = _set_notice(
-            f'等待加入: {lan_ip}:{LAN_PORT}#{lan_room_code}，你执{side_name(local_side)}'
+            f'房间号: {lan_room_code}，等待加入，你执{side_name(local_side)}'
         )
 
     def join_lan_host(target):
         nonlocal lan, lan_mode, lan_authenticated, lan_room_code, pvp_mode
         nonlocal human, ai_side, turn, show_console, lan_game_id, notice, notice_until
         host, port, room_code = _parse_join_target(target)
-        if not host:
-            notice, notice_until = _set_notice('请输入有效的主机 IP')
-            return False
         if len(room_code) != LAN_ROOM_CODE_DIGITS or not room_code.isdigit():
-            notice, notice_until = _set_notice(f'请输入主机 IP#{LAN_ROOM_CODE_DIGITS}位房间码')
+            notice, notice_until = _set_notice(f'请输入 {LAN_ROOM_CODE_DIGITS} 位房间号')
+            return False
+        if not host:
+            notice, notice_until = _set_notice(f'正在搜索房间 {room_code}...')
+            pygame.display.flip()
+            found = _discover_lan_host(room_code)
+            if not found:
+                notice, notice_until = _set_notice('未找到房间，可改用 主机IP#房间号')
+                return False
+            host, port = found
+        if not host:
+            notice, notice_until = _set_notice('请输入有效的主机 IP 或房间号')
             return False
         if hist:
             notice, notice_until = _set_notice('开局后不能加入联机房间')
@@ -632,29 +783,43 @@ def main():
 
     def leave_lan_to_local(message, notify_remote=False):
         nonlocal lan, lan_mode, lan_authenticated, lan_room_code, pvp_mode, local_side, remote_side
-        nonlocal lan_restart_local, lan_restart_remote, notice, notice_until
+        nonlocal lan_restart_local, lan_restart_remote, lan_undo_local, lan_undo_remote, lan_undo_move_no
+        nonlocal notice, notice_until, lan_discovery
         if lan:
             if notify_remote and lan.connected:
                 lan.send({'type': 'bye'})
             lan.close()
+        if lan_discovery:
+            lan_discovery.close()
+            lan_discovery = None
         lan = None
         lan_mode = False
         lan_authenticated = False
         lan_room_code = ''
         lan_restart_local = False
         lan_restart_remote = False
+        lan_undo_local = False
+        lan_undo_remote = False
+        lan_undo_move_no = None
         pvp_mode = True
         local_side, remote_side = None, None
         notice, notice_until = _set_notice(message)
 
     def reopen_lan_host(message):
-        nonlocal lan, lan_authenticated, lan_restart_local, lan_restart_remote, notice, notice_until
+        nonlocal lan, lan_authenticated, lan_restart_local, lan_restart_remote
+        nonlocal lan_undo_local, lan_undo_remote, lan_undo_move_no, notice, notice_until, lan_discovery
         if lan:
             lan.close()
+        if lan_discovery:
+            lan_discovery.close()
         lan_authenticated = False
         lan_restart_local = False
         lan_restart_remote = False
+        lan_undo_local = False
+        lan_undo_remote = False
+        lan_undo_move_no = None
         lan = LanConnection(True, port=LAN_PORT)
+        lan_discovery = LanDiscoveryResponder(lan_room_code, LAN_PORT)
         set_lan_sides(lan_host_side, is_host=True)
         notice, notice_until = _set_notice(message)
 
@@ -710,10 +875,76 @@ def main():
         else:
             notice, notice_until = _set_notice('已请求重开，等待对方按 R')
 
+    def apply_lan_undo(move_no):
+        nonlocal turn, over, is_draw, last, notice, notice_until
+        if move_no != len(hist) or not hist:
+            notice, notice_until = _set_notice('悔棋手数不匹配，请双方重开')
+            clear_lan_undo()
+            return False
+        r, c = hist.pop()
+        removed_color = board[r][c]
+        board[r][c] = C_NONE
+        if score_log:
+            score_log.pop()
+        last = hist[-1] if hist else None
+        turn = removed_color if removed_color in (C_BLACK, C_WHITE) else C_BLACK
+        over = False
+        is_draw = False
+        clear_lan_undo()
+        notice, notice_until = _set_notice(f'已悔棋，轮到{side_name(turn)}方')
+        return True
+
+    def commit_lan_undo(send_remote=False):
+        nonlocal notice, notice_until
+        move_no = len(hist)
+        if move_no <= 0:
+            notice, notice_until = _set_notice('当前没有可悔棋的落子')
+            clear_lan_undo()
+            return
+        if send_remote and lan and lan.connected:
+            ok = lan.send({
+                'type': 'undo_commit',
+                'game_id': lan_game_id,
+                'move_no': move_no,
+            })
+            if not ok:
+                notice, notice_until = _set_notice('悔棋确认发送失败')
+                return
+        apply_lan_undo(move_no)
+
+    def request_lan_undo():
+        nonlocal lan_undo_local, lan_undo_remote, lan_undo_move_no, notice, notice_until
+        if not lan_mode or not lan_authenticated or not lan or not lan.connected:
+            notice, notice_until = _set_notice('联机尚未就绪')
+            return
+        move_no = len(hist)
+        if move_no <= 0:
+            notice, notice_until = _set_notice('当前没有可悔棋的落子')
+            return
+        if lan_undo_local:
+            notice, notice_until = _set_notice('已请求悔棋，等待对方右键同意')
+            return
+        if lan_undo_move_no is not None and lan_undo_move_no != move_no:
+            clear_lan_undo()
+        lan_undo_local = True
+        lan_undo_move_no = move_no
+        if not lan.send({'type': 'undo_request', 'game_id': lan_game_id, 'move_no': move_no}):
+            clear_lan_undo()
+            notice, notice_until = _set_notice('悔棋请求发送失败')
+            return
+        if lan_undo_remote:
+            commit_lan_undo(send_remote=True)
+        else:
+            notice, notice_until = _set_notice('已请求悔棋，等待对方右键同意')
+
     def lan_status_text():
         if not lan_mode:
             return ''
         if lan and lan.connected and lan_authenticated:
+            if lan_undo_remote:
+                return '对方请求悔棋，右键同意'
+            if lan_undo_local:
+                return '已请求悔棋，等待对方右键'
             if lan_restart_remote:
                 return '对方请求重开，按 R 同意'
             if lan_restart_local:
@@ -723,7 +954,7 @@ def main():
         if lan and lan.is_host:
             if lan.connected:
                 return f'等待验证 | 主机执{side_name(lan_host_side)}'
-            return f'等待加入 | 主机执{side_name(lan_host_side)} | {lan_ip}:{lan.port}#{lan_room_code}'
+            return f'等待加入 | 房间号:{lan_room_code} | 手动IP:{lan_ip}'
         if lan and lan.connected:
             return '已连接主机，等待开局同步'
         return '正在连接主机...'
@@ -739,7 +970,8 @@ def main():
 
     def handle_lan_messages():
         nonlocal local_side, remote_side, forbidden_rule, human, ai_side, turn, lan_mode, pvp_mode, lan_host_side
-        nonlocal lan_authenticated, lan_restart_remote, notice, notice_until
+        nonlocal lan_authenticated, lan_restart_remote, lan_undo_remote, lan_undo_move_no
+        nonlocal notice, notice_until, lan_discovery
         if not lan:
             return
         current_lan = lan
@@ -751,11 +983,14 @@ def main():
             event = item.get('_event')
             if event == 'listening':
                 notice, notice_until = _set_notice(
-                    f'等待加入: {lan_ip}:{lan.port}#{lan_room_code}，主机执{side_name(lan_host_side)}'
+                    f'房间号: {lan_room_code}，等待加入，主机执{side_name(lan_host_side)}'
                 )
                 continue
             if event == 'connected':
                 if lan.is_host:
+                    if lan_discovery:
+                        lan_discovery.close()
+                        lan_discovery = None
                     notice, notice_until = _set_notice('对方已连接，等待房间码验证')
                 else:
                     notice, notice_until = _set_notice('已连接主机，等待开局同步')
@@ -884,6 +1119,43 @@ def main():
                     continue
                 apply_lan_restart(expected_host_side, expected_swapped)
                 continue
+            if kind == 'undo_request':
+                try:
+                    game_id = _require_json_int(msg.get('game_id'))
+                    move_no = _require_json_int(msg.get('move_no'))
+                except (TypeError, ValueError):
+                    notice, notice_until = _set_notice('收到异常悔棋请求')
+                    continue
+                if game_id != lan_game_id:
+                    continue
+                if move_no != len(hist) or not hist:
+                    notice, notice_until = _set_notice('收到过期悔棋请求，已忽略')
+                    clear_lan_undo()
+                    continue
+                if lan_undo_move_no is not None and lan_undo_move_no != move_no:
+                    notice, notice_until = _set_notice('收到不匹配的悔棋请求，已忽略')
+                    continue
+                lan_undo_remote = True
+                lan_undo_move_no = move_no
+                if lan_undo_local:
+                    commit_lan_undo(send_remote=True)
+                else:
+                    notice, notice_until = _set_notice('对方请求悔棋，右键同意')
+                continue
+            if kind == 'undo_commit':
+                try:
+                    game_id = _require_json_int(msg.get('game_id'))
+                    move_no = _require_json_int(msg.get('move_no'))
+                except (TypeError, ValueError):
+                    notice, notice_until = _set_notice('收到异常悔棋确认')
+                    continue
+                if game_id != lan_game_id:
+                    continue
+                if not lan_undo_local or lan_undo_move_no != move_no:
+                    notice, notice_until = _set_notice('收到未请求的悔棋确认，已忽略')
+                    continue
+                apply_lan_undo(move_no)
+                continue
             if kind == 'move':
                 if over:
                     continue
@@ -935,7 +1207,7 @@ def main():
                 elif not hist:
                     s1 = f'左键落子 | R重开 | Esc退出 | 模式: {mode_str} | 禁手:{"开" if forbidden_rule else "关"}'
                 else:
-                    s1 = f'末子: {side_name(_opponent(turn))} | R重开 | Esc退出 | 模式: {mode_str}'
+                    s1 = f'末子: {side_name(_opponent(turn))} | 右键悔棋 | R重开 | Esc退出'
                 s2 = lan_status_text()
             else:
                 if not hist:
@@ -965,8 +1237,8 @@ def main():
 
         if over:
             if lan_mode:
-                if is_draw: t = F.render('平局（双方按 R 重开）', True, (255, 0, 0))
-                else: t = F.render(f'{side_name(turn)}子胜（双方按 R 重开）', True, (255, 0, 0))
+                if is_draw: t = F.render('平局（R重开 / 右键悔棋）', True, (255, 0, 0))
+                else: t = F.render(f'{side_name(turn)}子胜（R重开 / 右键悔棋）', True, (255, 0, 0))
             else:
                 if is_draw: t = F.render('平局（点任意处重置）', True, (255, 0, 0))
                 else: t = F.render(f'{"黑子"if turn==C_BLACK else"白子"} 胜（点任意处重置）', True, (255, 0, 0))
@@ -1021,7 +1293,10 @@ def main():
                         leave_lan_to_local('已退出联机，切换为本地双人', notify_remote=True)
                 if e.type == pygame.MOUSEBUTTONDOWN:
                     if lan_mode:
-                        notice, notice_until = _set_notice('联机结束后需双方按 R 重开')
+                        if e.button == 3:
+                            request_lan_undo()
+                        else:
+                            notice, notice_until = _set_notice('联机结束后按 R 重开，右键请求悔棋')
                     else:
                         reset_board(reset_sides=True)
             continue
@@ -1139,6 +1414,8 @@ def main():
                                         leave_lan_to_local('落子发送失败，已切换为本地双人')
                                 else:
                                     notice, notice_until = _set_notice(reason)
+                    elif e.button == 3:
+                        request_lan_undo()
                     continue
 
                 if pvp_mode:
