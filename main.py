@@ -29,6 +29,10 @@ LAN_MAX_MESSAGE_BYTES = 4096
 LAN_ROOM_CODE_DIGITS = 6
 LAN_DISCOVERY_TIMEOUT = 1.2
 LAN_FRAME_RATE = 60
+LAN_TURN_SECONDS = 35
+LAN_TURN_MS = LAN_TURN_SECONDS * 1000
+LAN_PING_INTERVAL_MS = 2000
+LAN_PING_STALE_MS = 8000
 BLOCK     = 40
 MARGIN    = 40
 TOP_MARGIN = 72
@@ -53,16 +57,66 @@ def _draw_board(screen):
         pygame.draw.circle(screen, C_LINE,
                            (MARGIN + px * BLOCK, TOP_MARGIN + py * BLOCK), 5)
 
+def _grid_pos(r, c):
+    return MARGIN + c * BLOCK, TOP_MARGIN + r * BLOCK
+
 # ── 棋子绘制 ──
 def _draw_pieces(screen, board, last):
     for i in range(LINES):
         for j in range(LINES):
             if board[i][j] == C_NONE: continue
-            pos = (MARGIN + j * BLOCK, TOP_MARGIN + i * BLOCK)
+            pos = _grid_pos(i, j)
             c = (0, 0, 0) if board[i][j] == C_BLACK else (255, 255, 255)
             pygame.draw.circle(screen, c, pos, BLOCK // 2 - 4)
             if last == (i, j):
                 pygame.draw.circle(screen, C_RED, pos, 4)
+
+def _draw_win_line(screen, win_line):
+    if not win_line:
+        return
+    (r1, c1), (r2, c2) = win_line
+    start = _grid_pos(r1, c1)
+    end = _grid_pos(r2, c2)
+    pygame.draw.line(screen, (255, 235, 80), start, end, 8)
+    pygame.draw.line(screen, (220, 0, 0), start, end, 4)
+
+def _draw_ai_hint(screen, hint):
+    if not hint:
+        return
+    r, c = hint
+    if not (0 <= r < LINES and 0 <= c < LINES):
+        return
+    pos = _grid_pos(r, c)
+    pygame.draw.circle(screen, (0, 100, 255), pos, BLOCK // 2 - 2, 3)
+    pygame.draw.circle(screen, (255, 255, 255), pos, 8, 2)
+    pygame.draw.line(screen, (0, 100, 255), (pos[0] - 8, pos[1]), (pos[0] + 8, pos[1]), 2)
+    pygame.draw.line(screen, (0, 100, 255), (pos[0], pos[1] - 8), (pos[0], pos[1] + 8), 2)
+
+def _draw_lan_latency(screen, font, lan_mode, lan_authenticated, latency_ms):
+    if not (lan_mode and lan_authenticated):
+        return
+    if latency_ms is None:
+        label = '延迟: --ms'
+        color = (90, 90, 90)
+    else:
+        label = f'延迟: {latency_ms}ms'
+        if latency_ms < 80:
+            color = (0, 120, 40)
+        elif latency_ms < 180:
+            color = (170, 105, 0)
+        else:
+            color = (180, 0, 0)
+    surf = font.render(label, True, color)
+    pad_x = 6
+    rect = pygame.Rect(
+        W - surf.get_width() - pad_x * 2 - 8,
+        46,
+        surf.get_width() + pad_x * 2,
+        surf.get_height() + 4,
+    )
+    pygame.draw.rect(screen, (245, 225, 160), rect)
+    pygame.draw.rect(screen, (90, 65, 20), rect, 1)
+    screen.blit(surf, (rect.x + pad_x, rect.y + 2))
 
 def _check_draw(board):
     for row in board:
@@ -98,6 +152,26 @@ def _check_win_fast(board, r, c, color, forbidden_rule=False):
         elif count >= 5:
             return True
     return False
+
+def _find_win_line(board, r, c, color, forbidden_rule=False):
+    for dr, dc in ((1, 0), (0, 1), (1, 1), (1, -1)):
+        count = _line_count(board, r, c, dr, dc, color)
+        if forbidden_rule and color == C_BLACK:
+            if count != 5:
+                continue
+        elif count < 5:
+            continue
+
+        sr, sc = r, c
+        while 0 <= sr - dr < LINES and 0 <= sc - dc < LINES and board[sr - dr][sc - dc] == color:
+            sr -= dr
+            sc -= dc
+        er, ec = r, c
+        while 0 <= er + dr < LINES and 0 <= ec + dc < LINES and board[er + dr][ec + dc] == color:
+            er += dr
+            ec += dc
+        return (sr, sc), (er, ec)
+    return None
 
 def _has_overline_fast(board, r, c, color):
     for dr, dc in ((1, 0), (0, 1), (1, 1), (1, -1)):
@@ -592,13 +666,14 @@ def main():
     board = [[C_NONE] * LINES for _ in range(LINES)]
 
     human, ai_side, turn = C_BLACK, C_WHITE, C_BLACK
-    over, is_draw, last = False, False, None
+    over, is_draw, last, win_line = False, False, None, None
     hist, score_log = [], []
     show_console, prev_console = False, False
     forbidden_rule = False
     pvp_mode = False
     ai_depth = AI_DEPTH
     show_diff_menu = False
+    ai_hint = None
     notice, notice_until = '', 0
     btn_rects = []
     lan = None
@@ -616,6 +691,12 @@ def main():
     join_input, join_ip = False, ''
     lan_ip = _get_lan_ip()
     lan_discovery = None
+    lan_turn_started_at = None
+    lan_ping_seq = 0
+    lan_pending_pings = {}
+    lan_last_ping_at = 0
+    lan_latency_ms = None
+    lan_latency_updated_at = None
     forbidden_warm_started = False
 
     def quit_game():
@@ -629,13 +710,16 @@ def main():
         sys.exit()
 
     def reset_board(reset_sides=False):
-        nonlocal board, human, ai_side, turn, over, is_draw, last, notice, show_diff_menu
+        nonlocal board, human, ai_side, turn, over, is_draw, last, win_line, notice, show_diff_menu
+        nonlocal ai_hint, lan_turn_started_at
         nonlocal lan_restart_local, lan_restart_remote, lan_undo_local, lan_undo_remote, lan_undo_move_no
         board = [[C_NONE] * LINES for _ in range(LINES)]
         if reset_sides:
             human, ai_side = C_BLACK, C_WHITE
         turn = C_BLACK
-        over, is_draw, last = False, False, None
+        over, is_draw, last, win_line = False, False, None, None
+        ai_hint = None
+        lan_turn_started_at = None
         notice = ''
         show_diff_menu = False
         lan_restart_local = False
@@ -680,8 +764,65 @@ def main():
         lan_undo_remote = False
         lan_undo_move_no = None
 
+    def clear_input_events_keep_quit():
+        close_types = [pygame.QUIT]
+        window_close = getattr(pygame, 'WINDOWCLOSE', None)
+        if window_close is not None:
+            close_types.append(window_close)
+        close_events = [event for event in pygame.event.get() if event.type in close_types]
+        for event in close_events:
+            pygame.event.post(event)
+
+    def clear_lan_latency():
+        nonlocal lan_ping_seq, lan_pending_pings, lan_last_ping_at
+        nonlocal lan_latency_ms, lan_latency_updated_at
+        lan_ping_seq = 0
+        lan_pending_pings = {}
+        lan_last_ping_at = 0
+        lan_latency_ms = None
+        lan_latency_updated_at = None
+
+    def update_lan_latency_probe():
+        nonlocal lan_ping_seq, lan_last_ping_at, lan_latency_ms
+        if not (lan_mode and lan_authenticated and lan and lan.connected):
+            return
+        now = pygame.time.get_ticks()
+        if lan_latency_updated_at is not None and now - lan_latency_updated_at > LAN_PING_STALE_MS:
+            lan_latency_ms = None
+        for seq, sent_at in list(lan_pending_pings.items()):
+            if now - sent_at > LAN_PING_STALE_MS:
+                lan_pending_pings.pop(seq, None)
+        if now - lan_last_ping_at < LAN_PING_INTERVAL_MS:
+            return
+        lan_ping_seq += 1
+        lan_last_ping_at = now
+        lan_pending_pings[lan_ping_seq] = now
+        if not lan.send({'type': 'ping', 'seq': lan_ping_seq}):
+            lan_pending_pings.pop(lan_ping_seq, None)
+
+    def reset_lan_turn_timer():
+        nonlocal lan_turn_started_at
+        if lan_mode and lan_authenticated and not over:
+            lan_turn_started_at = pygame.time.get_ticks()
+        else:
+            lan_turn_started_at = None
+
+    def stop_lan_turn_timer():
+        nonlocal lan_turn_started_at
+        lan_turn_started_at = None
+
+    def lan_time_left_seconds():
+        if not (lan_mode and lan_authenticated and not over and lan_turn_started_at is not None):
+            return None
+        elapsed = pygame.time.get_ticks() - lan_turn_started_at
+        return max(0, (LAN_TURN_MS - elapsed + 999) // 1000)
+
+    def lan_timer_label():
+        left = lan_time_left_seconds()
+        return '' if left is None else f' | 限时:{left:02d}秒'
+
     def place_piece(r, c, color, record_score=True, lan_rules_only=False):
-        nonlocal over, is_draw, last, turn
+        nonlocal over, is_draw, last, win_line, turn, ai_hint
         if not (0 <= r < LINES and 0 <= c < LINES):
             return False, '请点击棋盘交叉点'
         if board[r][c] != C_NONE:
@@ -700,6 +841,7 @@ def main():
 
         board[r][c] = color
         last = (r, c)
+        ai_hint = None
         hist.append((r, c))
         if lan_rules_only:
             clear_lan_undo()
@@ -710,14 +852,20 @@ def main():
         else:
             over = ai.check_win(board, r, c, color, forbidden_rule)
         if over:
+            win_line = _find_win_line(board, r, c, color, forbidden_rule)
             turn = color
+            stop_lan_turn_timer()
             return True, ''
         if _check_draw(board):
             over = is_draw = True
             turn = color
+            win_line = None
+            stop_lan_turn_timer()
             return True, ''
 
         turn = _opponent(color)
+        if lan_mode and lan_authenticated:
+            reset_lan_turn_timer()
         return True, ''
 
     def start_lan_host():
@@ -731,6 +879,7 @@ def main():
         if lan_discovery:
             lan_discovery.close()
         reset_board()
+        clear_lan_latency()
         lan_game_id = 0
         show_console = False
         lan_room_code = f'{secrets.randbelow(10 ** LAN_ROOM_CODE_DIGITS):0{LAN_ROOM_CODE_DIGITS}d}'
@@ -769,6 +918,7 @@ def main():
         if lan:
             lan.close()
         reset_board()
+        clear_lan_latency()
         lan_game_id = 0
         show_console = False
         lan_room_code = room_code
@@ -784,7 +934,7 @@ def main():
     def leave_lan_to_local(message, notify_remote=False):
         nonlocal lan, lan_mode, lan_authenticated, lan_room_code, pvp_mode, local_side, remote_side
         nonlocal lan_restart_local, lan_restart_remote, lan_undo_local, lan_undo_remote, lan_undo_move_no
-        nonlocal notice, notice_until, lan_discovery
+        nonlocal notice, notice_until, lan_discovery, lan_turn_started_at, ai_hint
         if lan:
             if notify_remote and lan.connected:
                 lan.send({'type': 'bye'})
@@ -803,11 +953,15 @@ def main():
         lan_undo_move_no = None
         pvp_mode = True
         local_side, remote_side = None, None
+        lan_turn_started_at = None
+        ai_hint = None
+        clear_lan_latency()
         notice, notice_until = _set_notice(message)
 
     def reopen_lan_host(message):
         nonlocal lan, lan_authenticated, lan_restart_local, lan_restart_remote
         nonlocal lan_undo_local, lan_undo_remote, lan_undo_move_no, notice, notice_until, lan_discovery
+        nonlocal lan_turn_started_at
         if lan:
             lan.close()
         if lan_discovery:
@@ -818,6 +972,8 @@ def main():
         lan_undo_local = False
         lan_undo_remote = False
         lan_undo_move_no = None
+        lan_turn_started_at = None
+        clear_lan_latency()
         lan = LanConnection(True, port=LAN_PORT)
         lan_discovery = LanDiscoveryResponder(lan_room_code, LAN_PORT)
         set_lan_sides(lan_host_side, is_host=True)
@@ -827,7 +983,7 @@ def main():
         return bool(lan and lan.is_host and lan_mode and not lan_authenticated)
 
     def apply_lan_restart(next_host_side, swapped=False):
-        nonlocal lan_host_side, lan_game_id, turn, notice, notice_until
+        nonlocal lan_host_side, lan_game_id, turn, notice, notice_until, lan_turn_started_at
         if next_host_side not in (C_BLACK, C_WHITE):
             next_host_side = lan_host_side
         lan_host_side = next_host_side
@@ -835,6 +991,7 @@ def main():
         reset_board()
         lan_game_id += 1
         turn = C_BLACK
+        lan_turn_started_at = pygame.time.get_ticks()
         if swapped:
             notice, notice_until = _set_notice(f'已重开，双方黑白互换，你执{side_name(local_side)}')
         else:
@@ -876,7 +1033,7 @@ def main():
             notice, notice_until = _set_notice('已请求重开，等待对方按 R')
 
     def apply_lan_undo(move_no):
-        nonlocal turn, over, is_draw, last, notice, notice_until
+        nonlocal turn, over, is_draw, last, win_line, ai_hint, notice, notice_until
         if move_no != len(hist) or not hist:
             notice, notice_until = _set_notice('悔棋手数不匹配，请双方重开')
             clear_lan_undo()
@@ -890,6 +1047,9 @@ def main():
         turn = removed_color if removed_color in (C_BLACK, C_WHITE) else C_BLACK
         over = False
         is_draw = False
+        win_line = None
+        ai_hint = None
+        reset_lan_turn_timer()
         clear_lan_undo()
         notice, notice_until = _set_notice(f'已悔棋，轮到{side_name(turn)}方')
         return True
@@ -937,6 +1097,43 @@ def main():
         else:
             notice, notice_until = _set_notice('已请求悔棋，等待对方右键同意')
 
+    def finish_lan_timeout(loser, send_remote=False):
+        nonlocal over, is_draw, turn, win_line, ai_hint, notice, notice_until
+        if loser not in (C_BLACK, C_WHITE):
+            return
+        winner = _opponent(loser)
+        over = True
+        is_draw = False
+        turn = winner
+        win_line = None
+        ai_hint = None
+        stop_lan_turn_timer()
+        clear_lan_undo()
+        if loser == local_side:
+            notice, notice_until = _set_notice(f'你超时，{side_name(winner)}方胜')
+        else:
+            notice, notice_until = _set_notice(f'对方超时，{side_name(winner)}方胜')
+        if send_remote and lan and lan.connected:
+            ok = lan.send({
+                'type': 'timeout',
+                'game_id': lan_game_id,
+                'move_no': len(hist),
+                'loser': loser,
+            })
+            if not ok:
+                leave_lan_to_local('超时结果发送失败，已切换为本地双人')
+
+    def check_lan_turn_timeout():
+        if not (lan_mode and lan_authenticated and lan and lan.connected and not over):
+            return
+        if turn != local_side:
+            return
+        if lan_turn_started_at is None:
+            reset_lan_turn_timer()
+            return
+        if pygame.time.get_ticks() - lan_turn_started_at >= LAN_TURN_MS:
+            finish_lan_timeout(local_side, send_remote=True)
+
     def lan_status_text():
         if not lan_mode:
             return ''
@@ -950,7 +1147,7 @@ def main():
             if lan_restart_local:
                 return '已请求重开，等待对方按 R'
             who = '你' if turn == local_side else '对方'
-            return f'已连接 | 你执{side_name(local_side)} | 当前回合: {who}'
+            return f'已连接 | 你执{side_name(local_side)} | 当前回合: {who}{lan_timer_label()}'
         if lan and lan.is_host:
             if lan.connected:
                 return f'等待验证 | 主机执{side_name(lan_host_side)}'
@@ -971,7 +1168,7 @@ def main():
     def handle_lan_messages():
         nonlocal local_side, remote_side, forbidden_rule, human, ai_side, turn, lan_mode, pvp_mode, lan_host_side
         nonlocal lan_authenticated, lan_restart_remote, lan_undo_remote, lan_undo_move_no
-        nonlocal notice, notice_until, lan_discovery
+        nonlocal notice, notice_until, lan_discovery, lan_latency_ms, lan_latency_updated_at
         if not lan:
             return
         current_lan = lan
@@ -1042,6 +1239,7 @@ def main():
                         lan_authenticated = True
                         set_lan_sides(lan_host_side, is_host=True)
                         turn = C_BLACK
+                        reset_lan_turn_timer()
                         lan_mode, pvp_mode = True, False
                         ok = lan.send({
                             'type': 'start',
@@ -1075,10 +1273,29 @@ def main():
                 lan_host_side = host_side
                 set_lan_sides(host_side, is_host=False)
                 turn = C_BLACK
+                reset_lan_turn_timer()
                 lan_mode, pvp_mode = True, False
                 notice, notice_until = _set_notice(f'开局同步完成，你执{side_name(local_side)}')
                 continue
             if not lan_authenticated:
+                continue
+            if kind == 'ping':
+                try:
+                    seq = _require_json_int(msg.get('seq'))
+                except (TypeError, ValueError):
+                    continue
+                lan.send({'type': 'pong', 'seq': seq})
+                continue
+            if kind == 'pong':
+                try:
+                    seq = _require_json_int(msg.get('seq'))
+                except (TypeError, ValueError):
+                    continue
+                sent_at = lan_pending_pings.pop(seq, None)
+                if sent_at is not None:
+                    now = pygame.time.get_ticks()
+                    lan_latency_ms = max(0, now - sent_at)
+                    lan_latency_updated_at = now
                 continue
             if kind == 'restart_request':
                 try:
@@ -1156,6 +1373,26 @@ def main():
                     continue
                 apply_lan_undo(move_no)
                 continue
+            if kind == 'timeout':
+                if over:
+                    continue
+                try:
+                    game_id = _require_json_int(msg.get('game_id'))
+                    move_no = _require_json_int(msg.get('move_no'))
+                    loser = _require_json_int(msg.get('loser'))
+                except (TypeError, ValueError):
+                    notice, notice_until = _set_notice('收到异常超时数据')
+                    continue
+                if game_id != lan_game_id:
+                    continue
+                if move_no != len(hist):
+                    notice, notice_until = _set_notice('收到超时数据但棋局不同步')
+                    continue
+                if loser != remote_side or turn != remote_side:
+                    notice, notice_until = _set_notice('收到异常超时数据')
+                    continue
+                finish_lan_timeout(remote_side, send_remote=False)
+                continue
             if kind == 'move':
                 if over:
                     continue
@@ -1184,6 +1421,8 @@ def main():
     while True:
         clock.tick(LAN_FRAME_RATE)
         handle_lan_messages()
+        update_lan_latency_probe()
+        check_lan_turn_timeout()
         if lan_mode and show_console:
             show_console = False
 
@@ -1193,6 +1432,9 @@ def main():
             screen = pygame.display.set_mode((tw, H))
         _draw_board(screen)
         _draw_pieces(screen, board, last)
+        _draw_win_line(screen, win_line)
+        _draw_ai_hint(screen, ai_hint)
+        _draw_lan_latency(screen, Fh, lan_mode, lan_authenticated, lan_latency_ms)
 
         # ── 提示栏 (采用双行显示以节省空间) ──
         if not over:
@@ -1222,7 +1464,7 @@ def main():
                     if pvp_mode:
                         s2 = f'禁手:{"开" if forbidden_rule else "关"} | 当前回合: {"黑" if turn == C_BLACK else "白"}'
                     else:
-                        s2 = f'禁手:{"开" if forbidden_rule else "关"} | B AI辅助 | F难度:{diff_str}'
+                        s2 = f'禁手:{"开" if forbidden_rule else "关"} | B AI提示 | F难度:{diff_str}'
             screen.blit(Fh.render(s1, True, (0, 0, 180)), (10, 2))
             screen.blit(Fh.render(s2, True, (0, 0, 180)), (10, 22))
 
@@ -1306,7 +1548,7 @@ def main():
             pygame.display.set_caption('五子棋（AI 思考中...）')
             pygame.event.pump()
             action = ai.get_action(board, depth=ai_depth, ai_color=ai_side, forbidden_rule=forbidden_rule)
-            pygame.event.clear()
+            clear_input_events_keep_quit()
             if action is None:
                 over = is_draw = True
             else:
@@ -1358,13 +1600,16 @@ def main():
                     show_diff_menu = not show_diff_menu
                 if e.key == pygame.K_e and not hist and not over and not lan_mode:
                     pvp_mode = not pvp_mode
+                    ai_hint = None
                     notice, notice_until = _set_notice(f'已切换为 {"双人对战" if pvp_mode else "人机对战"}')
                 if e.key == pygame.K_a and not pvp_mode and not hist and not over and not lan_mode:
                     if human == C_BLACK: human, ai_side = C_WHITE, C_BLACK
                     else:                human, ai_side = C_BLACK, C_WHITE
                     turn = C_BLACK
+                    ai_hint = None
                 if e.key == pygame.K_d and not hist and not over and not lan_mode:
                     forbidden_rule = not forbidden_rule
+                    ai_hint = None
                     if forbidden_rule:
                         start_forbidden_warm_up()
                     notice, notice_until = _set_notice(f'本局禁手规则已{"开启" if forbidden_rule else "关闭"}')
@@ -1379,6 +1624,7 @@ def main():
                         for brect, val in btn_rects:
                             if brect.collidepoint(mx, my):
                                 ai_depth = val
+                                ai_hint = None
                                 notice, notice_until = _set_notice(f'AI 难度已设为 {_difficulty_name(val)}')
                                 show_diff_menu = False
                                 break
@@ -1431,6 +1677,7 @@ def main():
                         a = hist.pop(); board[a[0]][a[1]] = C_NONE
                         last = hist[-1] if hist else None
                         turn = _opponent(turn)
+                        ai_hint = None
                         notice = ''
                         if score_log: score_log.pop()
                 else:
@@ -1448,23 +1695,23 @@ def main():
                             p = hist.pop(); board[p[0]][p[1]] = C_NONE
                             last = hist[-1] if hist else None
                             turn = human
+                            ai_hint = None
                             notice = ''
                             if score_log: score_log.pop()
                             if score_log: score_log.pop()
 
-        # ── B 键 AI 辅助 ──
+        # ── B 键 AI 提示 ──
         if assist:
-            pygame.display.set_caption('五子棋（AI 辅助思考中...）')
+            pygame.display.set_caption('五子棋（AI 提示思考中...）')
             pygame.event.pump()
             action = ai.get_action(board, depth=ai_depth, ai_color=human, forbidden_rule=forbidden_rule)
-            pygame.event.clear()
+            clear_input_events_keep_quit()
             if action is None:
+                ai_hint = None
                 notice, notice_until = _set_notice('没有可下的合法点')
             else:
-                x, y = action
-                ok, reason = place_piece(x, y, human)
-                if not ok:
-                    notice, notice_until = _set_notice(reason)
+                ai_hint = action
+                notice, notice_until = _set_notice('AI 建议点已标出')
             pygame.display.set_caption('五子棋')
 
 if __name__ == '__main__':
